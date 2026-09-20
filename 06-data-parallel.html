@@ -1,0 +1,2487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data parallelism — Distributed Training I</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+/* ==========================================================
+   Distributed Training I — "Rack & Ledger"
+   Graphite hardware world + cream ledger bands for memory
+   ========================================================== */
+
+
+:root {
+  --graphite:   #1C1F22;
+  --panel:      #24282C;
+  --panel-hi:   #2E3338;
+  --rail:       #3A4045;
+  --copper:     #B87333;
+  --copper-dim: #7A4D24;
+  --cream:      #EDEAE3;
+  --cream-dim:  #A9A49B;
+  --cream-mute: #706C65;
+
+  /* the four bands — distinct hues, muted to sit in the graphite world */
+  --b-weight: #5E8CA0;   /* steel blue  — weight, bf16 */
+  --b-grad:   #D19A4A;   /* amber       — gradient, bf16 */
+  --b-master: #8B7BA8;   /* violet      — master copy, fp32 */
+  --b-opt:    #7C9468;   /* sage        — optimizer averages */
+
+
+  --sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --cond: 'Barlow Condensed', 'Inter', sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --measure: 68ch;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--graphite);
+  color: var(--cream);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- rack rail: the fixed left edge of the machine ---------- */
+
+.rack {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: 232px;
+  background: var(--panel);
+  border-right: 1px solid var(--rail);
+  padding: 26px 0 26px 0;
+  overflow-y: auto;
+}
+
+.rack-plate {
+  padding: 0 20px 20px;
+  border-bottom: 1px solid var(--rail);
+  margin-bottom: 14px;
+}
+
+.rack-plate a {
+  color: var(--cream);
+  text-decoration: none;
+  font-family: var(--cond);
+  font-size: 25px;
+  line-height: 1.1;
+  letter-spacing: 0.01em;
+  display: block;
+}
+
+.rack-plate span {
+  display: block;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--cream-mute);
+  margin-top: 7px;
+  letter-spacing: 0.04em;
+}
+
+/* each nav row is a blade in the rack */
+.blade {
+  display: flex;
+  align-items: baseline;
+  gap: 11px;
+  padding: 9px 20px 9px 17px;
+  color: var(--cream-dim);
+  text-decoration: none;
+  font-family: var(--cond);
+  font-size: 17px;
+  letter-spacing: 0.012em;
+  border-left: 3px solid transparent;
+  transition: background 120ms linear, color 120ms linear;
+}
+
+.blade u { /* the slot number, in mono */
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--cream-mute);
+  text-decoration: none;
+  min-width: 20px;
+}
+
+.blade:hover { background: var(--panel-hi); color: var(--cream); }
+
+.blade[aria-current="page"] {
+  color: var(--cream);
+  background: var(--panel-hi);
+  border-left-color: var(--copper);
+}
+
+.blade[aria-current="page"] u { color: var(--copper); }
+
+.blade.pending { opacity: 0.42; pointer-events: none; }
+
+.rack-group {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--cream-mute);
+  letter-spacing: 0.09em;
+  padding: 18px 20px 6px;
+}
+
+/* ---------- page body ---------- */
+
+main {
+  margin-left: 232px;
+  padding: 64px 56px 140px;
+  max-width: calc(var(--measure) + 340px);
+}
+
+.slot {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--copper);
+  letter-spacing: 0.1em;
+  margin-bottom: 14px;
+}
+
+h1 {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: clamp(40px, 6vw, 62px);
+  line-height: 1.02;
+  letter-spacing: -0.005em;
+  margin: 0 0 28px;
+  max-width: 18ch;
+}
+
+h2 {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 30px;
+  line-height: 1.15;
+  margin: 60px 0 16px;
+  color: var(--cream);
+}
+
+h3 {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 21px;
+  margin: 36px 0 10px;
+  color: var(--cream);
+}
+
+p, ul, ol { max-width: var(--measure); }
+p { margin: 0 0 20px; }
+li { margin-bottom: 9px; }
+
+.lede {
+  font-size: 20.5px;
+  line-height: 1.55;
+  color: var(--cream);
+  border-left: 2px solid var(--copper);
+  padding-left: 20px;
+  margin-bottom: 34px;
+}
+
+strong { font-weight: 600; color: #fff; }
+em { font-style: italic; color: var(--cream); }
+
+code, .num {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  color: var(--copper);
+  background: rgba(184, 115, 51, 0.10);
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+
+a.inline { color: var(--copper); }
+
+/* ---------- ledger table: ruled lines, memory accounting ---------- */
+
+.ledger {
+  width: 100%;
+  max-width: var(--measure);
+  border-collapse: collapse;
+  margin: 28px 0 30px;
+  font-size: 15.5px;
+}
+
+.ledger caption {
+  text-align: left;
+  font-family: var(--cond);
+  font-size: 18px;
+  color: var(--cream-dim);
+  padding-bottom: 9px;
+}
+
+.ledger th {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 15px;
+  color: var(--cream-mute);
+  text-align: left;
+  padding: 0 12px 7px 0;
+  border-bottom: 1px solid var(--rail);
+}
+
+.ledger th.n, .ledger td.n {
+  text-align: right;
+  font-family: var(--mono);
+  padding-right: 0;
+}
+
+.ledger td {
+  padding: 11px 12px 11px 0;
+  border-bottom: 1px solid rgba(58, 64, 69, 0.65);
+  color: var(--cream-dim);
+}
+
+.ledger td.n { color: var(--cream); font-size: 14px; }
+
+.ledger tr.total td {
+  border-bottom: none;
+  border-top: 2px solid var(--copper);
+  color: #fff;
+  font-weight: 600;
+  padding-top: 12px;
+}
+
+.ledger tr.total td.n { color: var(--copper); font-weight: 700; }
+
+/* a small copper swatch marking which band a row belongs to */
+.swatch {
+  display: inline-block;
+  width: 9px; height: 9px;
+  border-radius: 1px;
+  margin-right: 10px;
+  vertical-align: 0;
+}
+.sw-param { background: var(--b-weight); }
+.sw-grad  { background: var(--b-grad); }
+.sw-opt   { background: var(--b-master); }
+
+/* ---------- hardware panel: a blade drawn as an object ---------- */
+
+.figure {
+  margin: 36px 0 40px;
+  max-width: 860px;
+}
+
+.figure figcaption {
+  font-size: 14.5px;
+  color: var(--cream-mute);
+  margin-top: 12px;
+  max-width: 62ch;
+  line-height: 1.55;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--rail);
+  border-radius: 3px;
+  padding: 26px 28px;
+}
+
+/* screw-hole corners, so panels read as bolted hardware */
+.panel.bolted { position: relative; }
+.panel.bolted::before,
+.panel.bolted::after {
+  content: "";
+  position: absolute;
+  top: 9px; width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--rail);
+}
+.panel.bolted::before { left: 9px; }
+.panel.bolted::after  { right: 9px; }
+
+.nameplate {
+  font-family: var(--cond);
+  font-size: 14px;
+  letter-spacing: 0.05em;
+  color: var(--cream-mute);
+  margin-bottom: 16px;
+}
+
+/* ---------- cycle comparison (CPU vs GPU) ---------- */
+
+.cycles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(268px, 1fr));
+  gap: 20px;
+  margin: 30px 0 12px;
+}
+
+.cyc-head {
+  font-family: var(--cond);
+  font-size: 20px;
+  color: var(--cream);
+  margin-bottom: 3px;
+}
+.cyc-sub {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--cream-mute);
+  margin-bottom: 18px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  padding: 8px 0;
+  border-bottom: 1px dashed rgba(58, 64, 69, 0.8);
+}
+.row:last-child { border-bottom: none; }
+
+.tick {
+  font-size: 10.5px;
+  color: var(--cream-mute);
+  min-width: 52px;
+}
+.tick.same { color: var(--copper); }
+
+.expr { color: var(--cream); }
+.arrow { color: var(--copper-dim); }
+.res { color: var(--copper); }
+
+.lane-stack .row { border-bottom: none; padding: 5px 0; }
+.lane-stack {
+  border-left: 2px solid var(--copper);
+  padding-left: 16px;
+  margin-left: 4px;
+}
+
+/* ---------- callout ---------- */
+
+.callout {
+  border: 1px solid var(--copper-dim);
+  border-left-width: 3px;
+  background: rgba(184, 115, 51, 0.065);
+  border-radius: 2px;
+  padding: 20px 24px;
+  margin: 34px 0;
+  max-width: var(--measure);
+}
+.callout h4 {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 19px;
+  margin: 0 0 8px;
+  color: var(--cream);
+}
+.callout p:last-child { margin-bottom: 0; }
+
+/* ---------- arithmetic strip: the big settling number ---------- */
+
+.arith {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 30px;
+  margin: 34px 0 36px;
+  padding: 24px 0;
+  border-top: 1px solid var(--rail);
+  border-bottom: 1px solid var(--rail);
+}
+.arith div { line-height: 1.2; }
+.arith .v {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 30px;
+  color: var(--cream);
+  display: block;
+}
+.arith .v.hot { color: var(--copper); }
+.arith .k {
+  font-family: var(--cond);
+  font-size: 14.5px;
+  color: var(--cream-mute);
+  display: block;
+  margin-top: 6px;
+}
+.arith .op {
+  font-family: var(--mono);
+  font-size: 24px;
+  color: var(--cream-mute);
+  padding-bottom: 26px;
+}
+
+/* ---------- spec list ---------- */
+
+.spec {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px;
+  background: var(--rail);
+  border: 1px solid var(--rail);
+  margin: 26px 0 8px;
+  max-width: 760px;
+}
+.spec > div { background: var(--panel); padding: 16px 18px; }
+.spec b {
+  font-family: var(--mono);
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--cream);
+  display: block;
+}
+.spec span {
+  font-family: var(--cond);
+  font-size: 14px;
+  color: var(--cream-mute);
+  display: block;
+  margin-top: 5px;
+}
+
+/* ---------- diagrams ---------- */
+
+.diagram { width: 100%; height: auto; display: block; }
+
+.d-label { font-family: var(--cond); font-size: 15px; fill: var(--cream); }
+.d-small { font-family: var(--cond); font-size: 12.5px; fill: var(--cream-mute); }
+.d-mono  { font-family: var(--mono); font-size: 12px; fill: var(--cream); }
+.d-mono-sm { font-family: var(--mono); font-size: 10.5px; fill: var(--cream-mute); }
+.d-hot   { fill: var(--copper); }
+.d-wire  { stroke: var(--copper); stroke-width: 1.6; fill: none; }
+.d-wire-dim { stroke: var(--rail); stroke-width: 1.4; fill: none; }
+.d-box   { fill: var(--panel-hi); stroke: var(--rail); stroke-width: 1; }
+.d-box-hot { fill: rgba(184,115,51,0.12); stroke: var(--copper); stroke-width: 1.2; }
+.d-mem   { fill: #1A1D20; stroke: var(--rail); stroke-width: 1; }
+
+/* ---------- interactive widget ---------- */
+
+.widget {
+  background: var(--panel);
+  border: 1px solid var(--rail);
+  border-radius: 3px;
+  padding: 22px 24px 24px;
+  margin: 34px 0 14px;
+}
+
+.w-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 22px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--rail);
+}
+
+.w-btn {
+  font-family: var(--cond);
+  font-size: 16px;
+  letter-spacing: 0.03em;
+  color: var(--graphite);
+  background: var(--copper);
+  border: 1px solid var(--copper);
+  border-radius: 2px;
+  padding: 7px 20px;
+  cursor: pointer;
+}
+.w-btn:hover { background: #C9843D; }
+.w-btn.ghost {
+  background: transparent;
+  color: var(--cream-dim);
+  border-color: var(--rail);
+}
+.w-btn.ghost:hover { color: var(--cream); border-color: var(--cream-mute); }
+
+.w-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--cond);
+  font-size: 16px;
+  color: var(--cream-dim);
+  cursor: pointer;
+  padding: 6px 14px 6px 10px;
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+}
+.w-toggle input { accent-color: var(--copper); width: 15px; height: 15px; cursor: pointer; }
+.w-toggle.on { color: var(--cream); border-color: var(--copper-dim); }
+
+.w-status {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--cream-mute);
+  letter-spacing: 0.04em;
+  margin-left: auto;
+}
+
+.widget { overflow-x: auto; }
+
+.w-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 680px;
+}
+
+.w-gpu {
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 11px 10px 13px;
+  min-width: 0;
+  background: var(--graphite);
+}
+.w-gpu h5 {
+  font-family: var(--cond);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--cream);
+  margin: 0 0 10px;
+  letter-spacing: 0.03em;
+}
+.w-cap {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--cream-mute);
+  margin: 10px 0 5px;
+}
+.w-cap:first-of-type { margin-top: 0; }
+
+.w-vec { display: flex; gap: 4px; }
+.w-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: center;
+  padding: 5px 1px;
+  border-radius: 2px;
+  background: var(--panel-hi);
+  color: var(--cream);
+}
+.w-cell.wt { background: rgba(237,234,227,0.12); }
+.w-cell.gr { background: rgba(184,115,51,0.14); color: var(--copper); }
+.w-cell.dt { background: var(--panel); color: var(--cream-dim); font-size: 11px; }
+
+.w-avg {
+  margin-top: 14px;
+  border: 1px solid var(--copper-dim);
+  background: rgba(184,115,51,0.07);
+  border-radius: 2px;
+  padding: 11px 12px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.w-avg .lbl {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--copper);
+  min-width: 128px;
+}
+.w-avg .w-vec { flex: 1; }
+.w-avg .w-cell { background: transparent; color: var(--copper); font-size: 13px; }
+
+.w-cell.ap { background: var(--panel); color: var(--cream-mute); }
+.w-cell.ap.same { background: rgba(184,115,51,0.22); color: var(--copper); font-weight: 500; }
+.w-cell.wt.moved { background: rgba(184,115,51,0.20); color: #fff; }
+.w-cell.pg { background: var(--panel); color: var(--cream-dim); }
+
+.w-cap.hot { color: var(--copper); }
+
+.w-phases {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 18px;
+  padding: 0;
+}
+.w-phases li {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--cream-mute);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 5px 12px;
+  margin: 0;
+}
+.w-phases li.now {
+  color: var(--copper);
+  border-color: var(--copper);
+  background: rgba(184,115,51,0.10);
+}
+.w-phases li.done { color: var(--cream-dim); border-color: var(--cream-mute); }
+
+.w-work { margin-top: 18px; }
+
+/* batch strip: the eight samples, grouped by destination card */
+.w-batch {
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  background: var(--graphite);
+  padding: 12px 14px 13px;
+  margin-bottom: 14px;
+}
+.w-bcap {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  color: var(--cream-mute);
+  margin-bottom: 10px;
+}
+.w-brow { display: flex; flex-wrap: wrap; gap: 10px; }
+.w-bgrp {
+  flex: 1 1 160px;
+  border: 1px solid var(--rail);
+  border-left: 2px solid var(--copper-dim);
+  border-radius: 2px;
+  padding: 8px 9px 9px;
+}
+.w-btag {
+  display: block;
+  font-family: var(--cond);
+  font-size: 13px;
+  color: var(--copper);
+  letter-spacing: 0.03em;
+  margin-bottom: 6px;
+}
+.w-bs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--cream);
+  background: var(--panel-hi);
+  border-radius: 2px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  letter-spacing: 0.08em;
+}
+.w-bs:last-child { margin-bottom: 0; }
+.w-bs i {
+  font-style: normal;
+  font-size: 9.5px;
+  color: var(--cream-mute);
+  min-width: 10px;
+  letter-spacing: 0;
+}
+.w-bnote {
+  font-size: 14px;
+  color: var(--cream-mute);
+  line-height: 1.55;
+  margin-top: 11px;
+}
+.w-bnote b { color: var(--cream); font-weight: 600; }
+
+/* gutter so panel rows line up with their sample numbers */
+.w-idx {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--cream-mute);
+  min-width: 9px;
+  text-align: right;
+  align-self: center;
+}
+
+.w-note {
+  font-size: 15px;
+  line-height: 1.62;
+  color: var(--cream-dim);
+  margin: 0 0 12px;
+  max-width: none;
+}
+.w-note.dim { color: var(--cream-mute); font-size: 14px; }
+.w-note b { color: var(--cream); font-weight: 600; }
+.w-note em { color: var(--copper); font-style: normal; }
+.w-note code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: rgba(184,115,51,0.10);
+  color: var(--copper);
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+
+.w-eq {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  background: var(--graphite);
+}
+.w-eq .t {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  color: var(--cream-mute);
+  margin-right: 4px;
+}
+.w-eq code {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--cream);
+  background: var(--panel-hi);
+  padding: 4px 10px;
+  border-radius: 2px;
+}
+.w-eq code.r { background: rgba(184,115,51,0.18); color: var(--copper); }
+
+.w-tab {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 14px;
+  font-size: 14px;
+}
+.w-tab th {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 13.5px;
+  color: var(--cream-mute);
+  text-align: left;
+  padding: 0 10px 6px 0;
+  border-bottom: 1px solid var(--rail);
+}
+.w-tab th.n, .w-tab td.n { text-align: right; font-family: var(--mono); font-size: 12.5px; }
+.w-tab td {
+  padding: 7px 10px 7px 0;
+  border-bottom: 1px solid rgba(58,64,69,0.6);
+  color: var(--cream-dim);
+}
+.w-tab td.n { color: var(--cream); }
+.w-tab tr.sum td { border-top: 1px solid var(--rail); color: var(--cream); }
+.w-tab tr.res td {
+  border-bottom: none;
+  border-top: 2px solid var(--copper);
+  color: #fff;
+  font-weight: 600;
+}
+.w-tab tr.res td.n { color: var(--copper); }
+
+.w-drift {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 18px;
+  padding: 0;
+}
+.w-phases li {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--cream-mute);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 5px 12px;
+  margin: 0;
+}
+.w-phases li.now {
+  color: var(--copper);
+  border-color: var(--copper);
+  background: rgba(184,115,51,0.10);
+}
+.w-phases li.done { color: var(--cream-dim); border-color: var(--cream-mute); }
+
+.w-explain {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--cream-dim);
+  margin: 16px 0 0;
+  max-width: none;
+}
+.w-explain b {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--cream);
+  font-weight: 500;
+}
+.w-explain em { color: var(--copper); font-style: normal; }
+
+.w-drift {
+  margin-top: 14px;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rail);
+}
+.w-drift .lbl { font-family: var(--cond); font-size: 15px; color: var(--cream-dim); }
+.w-drift .val {
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--cream);
+}
+.w-drift .val.bad { color: var(--copper); }
+.w-drift .note { font-family: var(--cond); font-size: 14.5px; color: var(--cream-mute); }
+
+.w-foot {
+  margin-top: 12px;
+  font-size: 14px;
+  color: var(--cream-mute);
+  line-height: 1.6;
+}
+.w-foot b { font-family: var(--mono); font-size: 12.5px; color: var(--cream); font-weight: 500; }
+
+@media (max-width: 880px) {
+  .w-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 420px; }
+  .w-avg { flex-direction: column; align-items: stretch; gap: 8px; }
+  .w-avg .lbl { min-width: 0; }
+}
+
+/* ---------- reduce-scatter / all-gather stepper ---------- */
+
+.rs-wrap { overflow-x: auto; }
+
+.rs-tab {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 4px;
+  margin: 4px 0 6px;
+}
+.rs-tab th {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  color: var(--cream-mute);
+  font-weight: 400;
+  text-align: center;
+  padding-bottom: 3px;
+}
+.rs-tab th.n { text-align: center; }
+.rs-tab td.rs-r {
+  font-family: var(--cond);
+  font-size: 15px;
+  color: var(--cream-dim);
+  white-space: nowrap;
+  padding-right: 8px;
+  width: 1%;
+}
+.rs-c {
+  font-family: var(--mono);
+  font-size: 14px;
+  text-align: center;
+  padding: 11px 6px;
+  border-radius: 2px;
+  background: var(--panel-hi);
+  color: var(--cream-mute);
+  border: 1px solid transparent;
+}
+.rs-c.done { background: rgba(237,234,227,0.14); color: var(--cream); }
+.rs-c.own  { background: rgba(184,115,51,0.22); color: var(--copper); font-weight: 700; }
+.rs-c.empty { background: var(--graphite); color: var(--rail); }
+.rs-c.moved { border-color: var(--copper); }
+
+.w-btn:disabled { opacity: 0.35; cursor: default; }
+
+
+/* ---------- collectives stepper cells ---------- */
+
+.w-cell.part  { background: var(--panel-hi); color: var(--cream-mute); }
+.w-cell.full  { background: rgba(237,234,227,0.16); color: var(--cream); }
+.w-cell.owns  { background: rgba(184,115,51,0.24); color: var(--copper); font-weight: 700; }
+.w-cell.none  { background: var(--graphite); color: var(--rail); }
+.w-cell.send  { background: rgba(184,115,51,0.18); color: var(--copper); }
+.w-cell.recv  { background: rgba(237,234,227,0.10); color: var(--cream); }
+.w-cell.blank { background: transparent; color: var(--rail); }
+.w-cell.src {
+  background: transparent;
+  color: var(--cream-mute);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  padding: 3px 0;
+}
+.w-cell.src.ok { color: var(--copper); }
+
+.w-cap2 {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  color: var(--copper);
+  margin: 18px 0 8px;
+}
+
+.w-tab.lg td.hit {
+  background: rgba(184,115,51,0.16);
+  color: var(--copper);
+  border-radius: 2px;
+}
+.w-tab.lg td.hit b { color: var(--copper); }
+.w-tab.lg td.dimc { color: var(--cream-mute); }
+.w-tab.lg td.dimc span { font-size: 10px; color: var(--rail); }
+.w-tab.lg td, .w-tab.lg th { font-size: 12px; }
+.w-tab.lg td.n { font-size: 11.5px; }
+
+.w-pre {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--cream);
+  background: var(--graphite);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 13px 15px;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.cb-ring { width: 100%; height: auto; display: block; margin: 4px 0 14px; max-width: 780px; }
+.cb-rn { font-family: var(--mono); font-size: 13px; fill: var(--cream); }
+.cb-rl { font-family: var(--mono); font-size: 11px; fill: var(--copper); }
+.w-cell.moved { outline: 1px solid var(--copper); outline-offset: -1px; }
+
+.w-sum {
+  margin-top: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--cream-dim);
+  border-top: 1px solid var(--rail);
+  padding-top: 9px;
+  line-height: 1.45;
+}
+.w-sum b { color: var(--copper); font-weight: 700; }
+.w-cell.hdr {
+  background: transparent;
+  color: var(--cream-mute);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  padding: 0 0 3px;
+}
+.w-hdr { margin-bottom: 0; }
+.w-sum span { color: var(--cream-mute); }
+.w-sum.idle { color: var(--cream-mute); }
+
+/* ---------- tabbed matrix overview ---------- */
+
+.cb-overview {
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid var(--rail);
+}
+.mx-jump {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  color: var(--cream-mute);
+  margin-right: 4px;
+}
+.mx-tab.passed { color: var(--cream-dim); border-color: var(--cream-mute); }
+
+.mx-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--rail);
+}
+.mx-tab {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--cream-mute);
+  background: transparent;
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 7px 13px;
+  cursor: pointer;
+}
+.mx-tab:hover { color: var(--cream); }
+.mx-tab.on {
+  color: var(--copper);
+  border-color: var(--copper);
+  background: rgba(184,115,51,0.10);
+}
+.mx-cap {
+  font-family: var(--cond);
+  font-size: 15px;
+  color: var(--cream-dim);
+  margin-left: 8px;
+}
+
+.mx-split { display: flex; gap: 22px; flex-wrap: wrap; }
+.mx-main { flex: 1 1 440px; min-width: 0; }
+.mx-side { flex: 0 1 290px; min-width: 0; }
+.mx-note {
+  font-family: var(--cond);
+  font-size: 13.5px;
+  color: var(--cream-mute);
+  margin-top: 8px;
+}
+
+.mx-meter { margin-top: 12px; }
+.mx-bar {
+  height: 4px;
+  background: var(--rail);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.mx-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--copper);
+  transition: width 200ms ease;
+}
+.mx-mlabel {
+  font-family: var(--cond);
+  font-size: 13.5px;
+  color: var(--cream-mute);
+  margin-top: 7px;
+}
+.mx-mlabel b { font-family: var(--mono); font-size: 13px; color: var(--copper); }
+
+.mx-c.waiting { background: var(--graphite); color: var(--cream-mute); opacity: 0.45; }
+
+.mx-tab-grid { width: 100%; border-collapse: separate; border-spacing: 5px; }
+.mx-tab-grid th {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  font-weight: 400;
+  color: var(--cream-mute);
+  padding-bottom: 3px;
+}
+.mx-tab-grid th.r {
+  font-family: var(--cond);
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  text-align: right;
+  padding-right: 8px;
+  white-space: nowrap;
+  width: 1%;
+}
+.mx-c {
+  position: relative;
+  font-family: var(--mono);
+  font-size: 15px;
+  text-align: center;
+  padding: 14px 4px;
+  border-radius: 2px;
+  border: 1px solid transparent;
+}
+.mx-tab-grid.small .mx-c { font-size: 11.5px; padding: 7px 2px; }
+.mx-c i {
+  display: block;
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  color: var(--copper);
+  margin-top: 3px;
+}
+.mx-c.own   { background: rgba(237,234,227,0.10); color: var(--cream); }
+.mx-c.done  { background: rgba(184,115,51,0.16); color: var(--copper); border-color: var(--copper-dim); }
+.mx-c.stale { background: var(--graphite); color: var(--rail); }
+.mx-c.blank {
+  background: transparent;
+  border: 1px dashed var(--rail);
+  color: transparent;
+}
+.mx-tog {
+  font-size: 13.5px;
+  padding: 5px 11px 5px 8px;
+  margin-left: auto;
+}
+.mx-tog input { width: 13px; height: 13px; }
+.mx-sum {
+  font-family: var(--mono);
+  font-size: 13px;
+  text-align: center;
+  padding: 9px 2px;
+  color: var(--cream);
+  border-top: 2px solid var(--copper);
+}
+/* faint per-column tint so a column reads as a unit */
+.c0 { border-left: 2px solid rgba(237,234,227,0.30); }
+.c1 { border-left: 2px solid rgba(196,188,172,0.30); }
+.c2 { border-left: 2px solid rgba(142,135,120,0.34); }
+.c3 { border-left: 2px solid rgba(110,104,92,0.40); }
+
+@media (max-width: 880px) {
+  .mx-side { flex: 1 1 100%; }
+}
+
+/* ---------- carry-forward note ---------- */
+
+.carry {
+  border-left: 2px solid var(--copper);
+  background: rgba(184,115,51,0.05);
+  padding: 16px 20px;
+  margin: 34px 0;
+  max-width: var(--measure);
+  font-style: italic;
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--cream-dim);
+}
+.carry b {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--cream);
+  letter-spacing: 0.01em;
+}
+
+/* ---------- cost calculator ---------- */
+
+.cc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  color: var(--cream-mute);
+}
+.cc-field select {
+  font-family: var(--cond);
+  font-size: 15px;
+  color: var(--cream);
+  background: var(--panel-hi);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.cc-field select:hover { border-color: var(--cream-mute); }
+
+.cc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 22px;
+}
+.cc-box {
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  background: var(--graphite);
+  padding: 13px 15px 15px;
+}
+.cc-big {
+  font-family: var(--mono);
+  font-size: 25px;
+  font-weight: 700;
+  color: var(--cream);
+  margin-top: 6px;
+}
+.cc-big.hot { color: var(--copper); }
+.cc-sub {
+  font-family: var(--cond);
+  font-size: 13.5px;
+  color: var(--cream-mute);
+  margin-top: 5px;
+}
+
+.cc-bars { margin-bottom: 4px; }
+.cc-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+.cc-lbl {
+  font-family: var(--cond);
+  font-size: 15px;
+  color: var(--cream-dim);
+  min-width: 132px;
+}
+.cc-track {
+  flex: 1;
+  height: 20px;
+  background: var(--graphite);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.cc-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  transition: width 220ms ease;
+}
+.cc-fill.compute { background: rgba(237,234,227,0.30); }
+.cc-fill.comm { background: var(--copper); }
+.cc-val {
+  font-family: var(--mono);
+  font-size: 13.5px;
+  color: var(--cream);
+  min-width: 62px;
+  text-align: right;
+}
+
+/* ---------- pinned-axis cost widget ---------- */
+
+.cw-intro {
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: var(--cream-mute);
+  margin: 0 0 20px;
+  max-width: none;
+}
+.cw-intro b { color: var(--cream); font-weight: 600; }
+
+.cw-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.cw-controls.sub { margin-bottom: 20px; padding-bottom: 18px; border-bottom: 1px solid var(--rail); }
+.cw-leg {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  color: var(--cream-mute);
+}
+.cw-seg { display: flex; gap: 6px; flex-wrap: wrap; }
+.cw-seg button {
+  font-family: var(--cond);
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  color: var(--cream-mute);
+  background: transparent;
+  border: 1px solid var(--rail);
+  border-radius: 20px;
+  padding: 6px 16px;
+  cursor: pointer;
+}
+.cw-seg button:hover { color: var(--cream); }
+.cw-seg button.on {
+  color: var(--copper);
+  border-color: var(--copper);
+  background: rgba(184,115,51,0.10);
+}
+/* the GPU toggle drives the compute bar, so it takes the compute colour */
+#cwHw button.on {
+  color: #EDEAE3;
+  border-color: rgba(237,234,227,0.55);
+  background: rgba(237,234,227,0.10);
+}
+
+.cw-stage {
+  border: 1px solid var(--rail);
+  border-radius: 3px;
+  background: var(--graphite);
+  padding: 15px 18px 18px;
+  margin-bottom: 14px;
+}
+
+.cw-axis {
+  position: relative;
+  height: 18px;
+  margin: 10px 0 6px 132px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--cream-mute);
+}
+.cw-alab { position: absolute; left: -120px; top: 2px; letter-spacing: 0.08em; }
+.cw-tick { position: absolute; top: 2px; transform: translateX(-50%); }
+
+.cw-lane { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.cw-name {
+  width: 120px;
+  text-align: right;
+  font-family: var(--cond);
+  font-size: 17px;
+  color: var(--cream);
+  line-height: 1.15;
+}
+.cw-name i {
+  display: block;
+  font-style: normal;
+  font-size: 12.5px;
+  color: var(--cream-mute);
+  margin-top: 2px;
+}
+.cw-track {
+  position: relative;
+  flex: 1;
+  height: 52px;
+  background: rgba(0,0,0,0.18);
+  border-radius: 2px;
+}
+.cw-grid {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: var(--rail);
+  opacity: 0.45;
+}
+.cw-bar {
+  position: absolute;
+  top: 5px; bottom: 5px; left: 0;
+  border-radius: 2px;
+  transition: width 240ms ease;
+}
+.cw-bar.compute { background: rgba(237,234,227,0.30); }
+.cw-bar.comm { background: var(--copper); }
+.cw-ghost {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: var(--cream-mute);
+  opacity: 0.5;
+  transition: left 240ms ease;
+}
+.cw-ghost b {
+  position: absolute;
+  bottom: 2px; left: 5px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 400;
+  color: var(--cream-mute);
+  white-space: nowrap;
+}
+.cw-val {
+  position: absolute;
+  top: 8px;
+  font-family: var(--mono);
+  font-size: 19px;
+  color: var(--cream);
+  white-space: nowrap;
+  transition: left 240ms ease;
+}
+.cw-val i {
+  display: block;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--cream-mute);
+  margin-top: 3px;
+}
+
+.cw-ratio {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rail);
+}
+.cw-pct {
+  font-family: var(--mono);
+  font-size: 34px;
+  font-weight: 700;
+  color: var(--copper);
+}
+.cw-pct.over { color: #D9534F; }
+.cw-rlbl { font-family: var(--cond); font-size: 17px; color: var(--cream); }
+.cw-rsub { font-family: var(--cond); font-size: 14.5px; color: var(--cream-mute); }
+
+.cw-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.cw-stat {
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 12px 14px;
+}
+.cw-stat b {
+  display: block;
+  font-family: var(--mono);
+  font-size: 21px;
+  font-weight: 700;
+  color: var(--cream);
+}
+.cw-stat b.hot { color: var(--copper); }
+.cw-stat b.cool { color: #EDEAE3; }
+.cw-stat span {
+  display: block;
+  font-family: var(--cond);
+  font-size: 13px;
+  color: var(--cream-mute);
+  margin-top: 4px;
+  line-height: 1.35;
+}
+
+@media (max-width: 880px) {
+  .cw-name { width: 84px; font-size: 15px; }
+  .cw-axis { margin-left: 96px; }
+  .cw-val { font-size: 15px; }
+}
+
+/* ---------- walkthrough-to-cost bridge ---------- */
+
+.br-map { margin-bottom: 22px; }
+.br-map td.br-toy { color: var(--cream-mute); font-family: var(--mono); font-size: 11.5px; }
+.br-map td.br-real { color: var(--cream); font-family: var(--mono); font-size: 13px; }
+.br-mult {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--copper);
+  background: rgba(184,115,51,0.14);
+  padding: 1px 6px;
+  border-radius: 2px;
+}
+
+.br-strip {
+  border: 1px solid var(--rail);
+  border-radius: 3px;
+  background: var(--graphite);
+  padding: 14px 16px 15px;
+  margin-bottom: 14px;
+}
+.br-hops {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 12px 0 12px;
+}
+.br-hop {
+  width: 26px;
+  height: 30px;
+  border-radius: 2px;
+  display: block;
+}
+.br-hop.rs { background: var(--copper); }
+.br-hop.ag { background: rgba(237,234,227,0.22); }
+.br-gap { width: 14px; }
+.br-more {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--cream-mute);
+  margin-left: 6px;
+}
+.br-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  font-family: var(--cond);
+  font-size: 13.5px;
+  color: var(--cream-mute);
+}
+.br-legend .sw {
+  display: inline-block;
+  width: 11px; height: 11px;
+  border-radius: 2px;
+  margin-right: 7px;
+}
+.br-legend .sw.rs { background: var(--copper); }
+.br-legend .sw.ag { background: rgba(237,234,227,0.22); }
+
+/* ---------- ZeRO stages widget ---------- */
+
+.zw-stage {
+  border: 1px solid var(--rail);
+  border-radius: 3px;
+  background: var(--graphite);
+  padding: 14px 16px 15px;
+  margin-bottom: 16px;
+  overflow-x: auto;
+}
+.zw-cards { display: flex; gap: 10px; margin: 12px 0 10px; min-width: 700px; }
+.zw-gpu { flex: 1; min-width: 0; }
+.zw-stacks {
+  display: flex;
+  gap: 2px;
+  align-items: flex-end;
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 7px 5px 5px;
+  background: var(--panel);
+}
+.zw-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; }
+.zw-cell { display: block; width: 100%; }
+.zw-cell.ghost {
+  background: transparent;
+  border: 1px dashed var(--rail);
+  border-top: none;
+  border-bottom: none;
+}
+.zw-col .zw-cell:first-child { border-radius: 1px 1px 0 0; }
+.zw-tick { display: block; height: 3px; margin-top: 4px; background: transparent; }
+.zw-tick.own { background: var(--copper); }
+.zw-name {
+  font-family: var(--cond);
+  font-size: 13px;
+  color: var(--cream-mute);
+  text-align: center;
+  margin-top: 6px;
+}
+.zw-foot {
+  font-family: var(--cond);
+  font-size: 13.5px;
+  color: var(--cream-mute);
+  line-height: 1.5;
+}
+.zw-foot i { color: var(--copper); font-style: italic; }
+
+.zw-split { display: flex; gap: 20px; flex-wrap: wrap; }
+.zw-left { flex: 1 1 400px; min-width: 0; }
+.zw-right { flex: 1 1 300px; min-width: 0; }
+
+.zw-meter { margin: 10px 0 14px; }
+.zw-track {
+  position: relative;
+  height: 26px;
+  background: var(--graphite);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.zw-need-bar {
+  display: block;
+  height: 100%;
+  background: repeating-linear-gradient(45deg, rgba(217,83,79,0.55) 0 6px, rgba(217,83,79,0.30) 6px 12px);
+  transition: width 240ms ease;
+}
+.zw-need-bar.ok {
+  background: repeating-linear-gradient(45deg, rgba(184,115,51,0.55) 0 6px, rgba(184,115,51,0.28) 6px 12px);
+}
+.zw-card-line { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--cream); }
+.zw-marks {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-family: var(--cond);
+  font-size: 13px;
+  color: var(--cream-mute);
+  margin-top: 6px;
+}
+.zw-need b.bad { color: #D9534F; font-family: var(--mono); font-size: 12px; }
+.zw-need b.ok { color: var(--copper); font-family: var(--mono); font-size: 12px; }
+
+.zw-note {
+  font-family: var(--cond);
+  font-size: 14px;
+  color: var(--cream-mute);
+  line-height: 1.55;
+  margin-top: 10px;
+}
+.zw-note b { color: var(--cream); }
+
+.zw-tab td, .zw-tab th { font-size: 13px; }
+.zw-sw {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 2px;
+  margin-right: 8px;
+}
+.zw-tab td.zw-one { color: var(--copper); }
+
+.zw-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid var(--rail);
+}
+.zw-head b {
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 700;
+}
+.zw-head b.bad { color: #D9534F; }
+.zw-head b.ok { color: var(--copper); }
+.zw-head span {
+  font-family: var(--cond);
+  font-size: 13.5px;
+  color: var(--cream-mute);
+  line-height: 1.35;
+}
+
+/* ---------- memory ladder ---------- */
+
+.ml-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 260px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  color: var(--cream-mute);
+}
+.ml-field input[type=range] { width: 100%; accent-color: var(--copper); cursor: pointer; }
+.ml-field output {
+  font-family: var(--cond);
+  font-size: 16px;
+  letter-spacing: 0.01em;
+  color: var(--cream);
+}
+
+.ml-rows { margin: 6px 0 4px; }
+.ml-row { display: flex; align-items: center; gap: 12px; margin-bottom: 11px; }
+.ml-lbl {
+  width: 128px;
+  font-family: var(--cond);
+  font-size: 15px;
+  color: var(--cream-dim);
+  flex: none;
+}
+.ml-track {
+  position: relative;
+  flex: 1;
+  height: 22px;
+  background: var(--graphite);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  overflow: hidden;
+  min-width: 0;
+}
+.ml-bar { display: block; height: 100%; opacity: 0.75; transition: width 160ms ease; }
+.ml-card { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--copper); }
+.ml-floor {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: var(--cream);
+  opacity: 0.65;
+}
+.ml-val {
+  font-family: var(--mono);
+  font-size: 13px;
+  width: 58px;
+  text-align: right;
+  flex: none;
+}
+.ml-val.ok { color: var(--copper); }
+.ml-val.bad { color: #D9534F; }
+.ml-verdict {
+  font-family: var(--cond);
+  font-size: 13.5px;
+  width: 38px;
+  flex: none;
+}
+.ml-verdict.ok { color: var(--copper); }
+.ml-verdict.bad { color: #D9534F; }
+
+/* ---------- memory wall chart ---------- */
+
+.mw-split { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+.mw-chart { flex: 1 1 440px; min-width: 0; }
+.mw-side { flex: 1 1 280px; min-width: 0; }
+.mw-chart svg { width: 100%; height: auto; }
+
+.w-tab td.mw-ok { color: var(--copper); }
+.w-tab td.mw-bad { color: #D9534F; }
+
+.mw-floor {
+  border: 1px solid var(--copper-dim);
+  border-left-width: 3px;
+  background: rgba(184,115,51,0.07);
+  border-radius: 2px;
+  padding: 12px 16px;
+  margin: 16px 0 12px;
+  font-family: var(--cond);
+  font-size: 15.5px;
+  color: var(--cream-dim);
+}
+.mw-floor b { color: var(--copper); font-weight: 600; }
+
+/* ---------- state + activations widget ---------- */
+
+.tv-wrap { display: flex; gap: 22px; flex-wrap: wrap; align-items: flex-start; }
+.tv-chart { flex: 0 1 320px; min-width: 0; }
+.tv-chart svg { width: 100%; height: auto; }
+.tv-side { flex: 1 1 280px; min-width: 0; }
+
+.tv-verdicts { margin-top: 14px; }
+.tv-v {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--cond);
+  font-size: 14.5px;
+  color: var(--cream-dim);
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(58,64,69,0.6);
+}
+.tv-v .sw { width: 10px; height: 10px; border-radius: 2px; }
+.tv-v b { margin-left: auto; font-family: var(--mono); font-size: 12px; }
+.tv-v b.ok { color: var(--copper); }
+.tv-v b.bad { color: #D9534F; }
+
+/* ---------- overlap timeline ---------- */
+
+.ob-stage {
+  border: 1px solid var(--rail);
+  border-radius: 3px;
+  background: var(--graphite);
+  padding: 14px 16px 12px;
+  margin-bottom: 14px;
+  overflow-x: auto;
+}
+.ob-stage svg { width: 100%; height: auto; min-width: 620px; }
+.ob-cap {
+  font-family: var(--cond);
+  font-size: 14px;
+  color: var(--cream-mute);
+  line-height: 1.5;
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rail);
+}
+.ob-cap b { color: var(--cream); }
+
+.cw-note-inline {
+  font-family: var(--cond);
+  font-size: 14px;
+  color: var(--cream-mute);
+}
+
+/* ---------- lab steps ---------- */
+
+.lab-steps {
+  list-style: none;
+  counter-reset: step;
+  padding: 0;
+  margin: 26px 0 30px;
+  max-width: var(--measure);
+}
+.lab-steps li {
+  counter-increment: step;
+  position: relative;
+  padding: 0 0 18px 48px;
+  margin: 0 0 18px;
+  border-bottom: 1px solid var(--rail);
+}
+.lab-steps li:last-child { border-bottom: none; }
+.lab-steps li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0; top: 1px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--copper);
+  border: 1px solid var(--copper-dim);
+  border-radius: 2px;
+  width: 26px;
+  height: 26px;
+  line-height: 24px;
+  text-align: center;
+}
+.lab-steps b {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 20px;
+  color: var(--cream);
+  display: block;
+  margin-bottom: 6px;
+}
+.lab-steps p { margin: 0; color: var(--cream-dim); font-size: 15.5px; }
+
+/* ---------- footer nav ---------- */
+
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 84px;
+  padding-top: 22px;
+  border-top: 1px solid var(--rail);
+  max-width: 860px;
+}
+.pager a {
+  color: var(--cream-dim);
+  text-decoration: none;
+  font-family: var(--cond);
+  font-size: 19px;
+}
+.pager a:hover { color: var(--copper); }
+.pager a span {
+  display: block;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--cream-mute);
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+}
+.pager .next { text-align: right; }
+
+/* ---------- index-only ---------- */
+
+.toc { max-width: 780px; margin-top: 44px; }
+
+.toc-row {
+  display: grid;
+  grid-template-columns: 46px 1fr;
+  gap: 22px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--rail);
+  text-decoration: none;
+  color: inherit;
+}
+.toc-row:first-child { border-top: 1px solid var(--rail); }
+.toc-row u {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--copper);
+  text-decoration: none;
+  padding-top: 6px;
+}
+.toc-row b {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 24px;
+  color: var(--cream);
+  display: block;
+  line-height: 1.2;
+}
+.toc-row p {
+  margin: 6px 0 0;
+  font-size: 15.5px;
+  color: var(--cream-dim);
+  max-width: 60ch;
+}
+a.toc-row:hover b { color: var(--copper); }
+.toc-row.pending { opacity: 0.4; }
+.toc-row.pending u { color: var(--cream-mute); }
+
+/* ---------- responsive ---------- */
+
+@media (max-width: 880px) {
+  .rack {
+    position: static;
+    width: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--rail);
+    padding: 20px 0 12px;
+  }
+  main { margin-left: 0; padding: 36px 22px 100px; }
+  body { font-size: 16.5px; }
+  .arith { gap: 20px; }
+  .arith .op { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+  html { scroll-behavior: auto; }
+}
+
+:focus-visible {
+  outline: 2px solid var(--copper);
+  outline-offset: 2px;
+}
+
+</style>
+</head>
+<body>
+
+<nav class="rack">
+  <div class="rack-plate">
+    <a href="index.html">Distributed Training I</a>
+    <span>DATA PARALLEL &amp; ZeRO</span>
+  </div>
+  <div class="rack-group">GROUNDWORK</div>
+  <a class="blade" href="01-memory-tax.html"><u>00</u>The memory tax</a>
+  <a class="blade" href="02-gpu-simd.html"><u>01</u>What a GPU is</a>
+  <a class="blade" href="03-kernels.html"><u>02</u>Three kernels or one</a>
+  <a class="blade" href="04-terminology.html"><u>03</u>Terminology</a>
+  <div class="rack-group">THE ARC</div>
+  <a class="blade" href="05-what-multiplies.html"><u>04</u>What multiplies</a>
+  <a class="blade" href="06-data-parallel.html" aria-current="page"><u>05</u>Data parallel</a>
+  <a class="blade" href="07-collectives.html"><u>06</u>Collective operations</a>
+  <a class="blade" href="08-cost.html"><u>07</u>Cost of communication</a>
+  <a class="blade" href="09-zero-stages.html"><u>08</u>ZeRO stages 1, 2, 3</a>
+  <a class="blade" href="10-memory-ladder.html"><u>09</u>The memory ladder</a>
+  <a class="blade" href="11-offload.html"><u>10</u>Offload to CPU and NVMe</a>
+  <a class="blade" href="12-implementations.html"><u>11</u>FSDP2 and DeepSpeed</a>
+  <a class="blade" href="13-overlap.html"><u>12</u>Overlapping comm with compute</a>
+  <a class="blade" href="14-precision.html"><u>13</u>Precision and Blackwell</a>
+  <a class="blade" href="15-side-by-side.html"><u>14</u>Side by side</a>
+  <div class="rack-group">THE LAB</div>
+  <a class="blade" href="16-lab-plan.html"><u>L1</u>Build plan</a>
+  <a class="blade" href="17-lab-foundation.html"><u>L2</u>The virtual GPU</a>
+  <a class="blade" href="18-lab-schemes.html"><u>L3</u>The four schemes</a>
+  <a class="blade" href="19-lab-checks.html"><u>L4</u>The two checks</a>
+  <a class="blade" href="20-lab-results.html"><u>L5</u>Results and write-up</a>
+</nav>
+
+<main>
+  <div class="slot">05 / THE ARC</div>
+  <h1>Data parallelism</h1>
+
+  <p class="lede">The simplest way to use eight GPUs is to give each of them a complete copy of
+  the model and a different portion of the data. Each GPU reads its own examples, runs them
+  through its own copy, and produces its own gradients. Those gradients differ from each
+  other, because each GPU saw different text.</p>
+
+  <p>The copies then have to be brought back into agreement. Every GPU sends its gradients to
+  every other GPU, all of them compute the average, and each applies that same average to its
+  own copy. Because they started identical and applied an identical update, they remain
+  identical. This arrangement is called <strong>data parallelism</strong>.</p>
+
+  <figure class="figure">
+    <svg class="diagram" viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg" role="img"
+         aria-label="Eight GPUs with different data producing different gradients, averaged, then applied identically">
+
+      <!-- row 1: different data -->
+      <text class="d-small" x="0" y="14">different text on each card</text>
+      <g>
+        <rect class="d-box" x="0" y="24" width="98" height="26" rx="2"/>
+        <rect class="d-box" x="110" y="24" width="98" height="26" rx="2"/>
+        <rect class="d-box" x="220" y="24" width="98" height="26" rx="2"/>
+        <rect class="d-box" x="330" y="24" width="98" height="26" rx="2"/>
+        <rect class="d-box" x="440" y="24" width="98" height="26" rx="2"/>
+        <rect class="d-box" x="550" y="24" width="98" height="26" rx="2"/>
+        <rect class="d-box" x="660" y="24" width="98" height="26" rx="2"/>
+        <rect class="d-box" x="770" y="24" width="98" height="26" rx="2"/>
+      </g>
+      <g class="d-mono-sm" text-anchor="middle" fill="#706C65">
+        <text x="49" y="42">shard 0</text><text x="159" y="42">shard 1</text>
+        <text x="269" y="42">shard 2</text><text x="379" y="42">shard 3</text>
+        <text x="489" y="42">shard 4</text><text x="599" y="42">shard 5</text>
+        <text x="709" y="42">shard 6</text><text x="819" y="42">shard 7</text>
+      </g>
+
+      <!-- row 2: identical replicas -->
+      <text class="d-small" x="0" y="76">identical model on each card</text>
+      <g>
+        <rect class="d-box" x="0" y="86" width="98" height="32" rx="2"/>
+        <rect class="d-box" x="110" y="86" width="98" height="32" rx="2"/>
+        <rect class="d-box" x="220" y="86" width="98" height="32" rx="2"/>
+        <rect class="d-box" x="330" y="86" width="98" height="32" rx="2"/>
+        <rect class="d-box" x="440" y="86" width="98" height="32" rx="2"/>
+        <rect class="d-box" x="550" y="86" width="98" height="32" rx="2"/>
+        <rect class="d-box" x="660" y="86" width="98" height="32" rx="2"/>
+        <rect class="d-box" x="770" y="86" width="98" height="32" rx="2"/>
+      </g>
+      <g>
+        <rect x="8" y="94" width="82" height="16" fill="#EDEAE3"/>
+        <rect x="118" y="94" width="82" height="16" fill="#EDEAE3"/>
+        <rect x="228" y="94" width="82" height="16" fill="#EDEAE3"/>
+        <rect x="338" y="94" width="82" height="16" fill="#EDEAE3"/>
+        <rect x="448" y="94" width="82" height="16" fill="#EDEAE3"/>
+        <rect x="558" y="94" width="82" height="16" fill="#EDEAE3"/>
+        <rect x="668" y="94" width="82" height="16" fill="#EDEAE3"/>
+        <rect x="778" y="94" width="82" height="16" fill="#EDEAE3"/>
+      </g>
+
+      <!-- row 3: different gradients -->
+      <text class="d-small" x="0" y="146">different gradients come out</text>
+      <g>
+        <rect class="d-box" x="0" y="156" width="98" height="30" rx="2"/>
+        <rect class="d-box" x="110" y="156" width="98" height="30" rx="2"/>
+        <rect class="d-box" x="220" y="156" width="98" height="30" rx="2"/>
+        <rect class="d-box" x="330" y="156" width="98" height="30" rx="2"/>
+        <rect class="d-box" x="440" y="156" width="98" height="30" rx="2"/>
+        <rect class="d-box" x="550" y="156" width="98" height="30" rx="2"/>
+        <rect class="d-box" x="660" y="156" width="98" height="30" rx="2"/>
+        <rect class="d-box" x="770" y="156" width="98" height="30" rx="2"/>
+      </g>
+      <g class="d-mono-sm" text-anchor="middle" fill="#C4BCAC">
+        <text x="49" y="176">g&#8320;</text><text x="159" y="176">g&#8321;</text>
+        <text x="269" y="176">g&#8322;</text><text x="379" y="176">g&#8323;</text>
+        <text x="489" y="176">g&#8324;</text><text x="599" y="176">g&#8325;</text>
+        <text x="709" y="176">g&#8326;</text><text x="819" y="176">g&#8327;</text>
+      </g>
+
+      <!-- all-reduce funnel -->
+      <g class="d-wire">
+        <path d="M49 186 L49 206 L430 206 L430 222"/>
+        <path d="M159 186 L159 206"/><path d="M269 186 L269 206"/>
+        <path d="M379 186 L379 206"/><path d="M489 186 L489 206"/>
+        <path d="M599 186 L599 206"/><path d="M709 186 L709 206"/>
+        <path d="M819 186 L819 206 L430 206"/>
+      </g>
+      <rect class="d-box-hot" x="300" y="222" width="260" height="40" rx="3"/>
+      <text class="d-label" x="430" y="248" text-anchor="middle">all-reduce &mdash; average</text>
+
+      <!-- fan back out -->
+      <g class="d-wire">
+        <path d="M430 262 L430 280 L49 280 L49 296"/>
+        <path d="M430 280 L159 280"/><path d="M430 280 L269 280"/>
+        <path d="M430 280 L379 280"/><path d="M430 280 L489 280"/>
+        <path d="M430 280 L599 280"/><path d="M430 280 L709 280"/>
+        <path d="M430 280 L819 280 L819 296"/>
+        <path d="M159 280 L159 296"/><path d="M269 280 L269 296"/>
+        <path d="M379 280 L379 296"/><path d="M489 280 L489 296"/>
+        <path d="M599 280 L599 296"/><path d="M709 280 L709 296"/>
+      </g>
+      <text class="d-mono-sm d-hot" x="430" y="318" text-anchor="middle">every card applies the same average, so every card stays identical</text>
+    </svg>
+    <figcaption>Data differs, gradients differ, the average does not. That is the whole
+    mechanism.</figcaption>
+  </figure>
+
+  <h2>Watch it happen</h2>
+
+  <p>Four GPUs hold one copy each of the same four weights, and a batch of eight samples is
+  split two per GPU. The loss on a sample is
+  <code>L = 0.5 &middot; &Vert;w &minus; x&Vert;&sup2;</code>, so that sample's gradient is
+  <code>w &minus; x</code>, and a GPU's gradient is the mean over its two samples. The update
+  is <code>w := w &minus; 0.1g</code>.</p>
+
+  <p>The batch of eight is <em>split</em>, not copied: samples 1 and 2 go to GPU 0, samples 3
+  and 4 to GPU 1, and so on. Each sample is seen by exactly one card, which is why the eight
+  gradients that exist across the cluster are four means of two rather than eight copies of
+  anything. The strip at the top of the widget shows the split for the current batch.</p>
+
+  <p>Each batch runs in three phases and the button walks one phase at a time. The working
+  underneath the panels shows the actual arithmetic at each phase &mdash; which numbers are
+  being subtracted from which, what is being averaged with what, and where the result lands.</p>
+
+  <div class="widget">
+    <div class="w-controls">
+      <button class="w-btn" id="dpStep">Compute local gradients</button>
+      <button class="w-btn ghost" id="dpReset">Reset</button>
+      <label class="w-toggle on" id="dpAvgLabel">
+        <input type="checkbox" id="dpAvg" checked>
+        average gradients
+      </label>
+      <span class="w-status" id="dpStatus">batch 0 · not yet stepped</span>
+    </div>
+
+    <ol class="w-phases" id="dpPhases">
+      <li data-p="1">1 &nbsp;each card computes its own gradient</li>
+      <li data-p="2">2 &nbsp;the four gradients are averaged</li>
+      <li data-p="3">3 &nbsp;every card subtracts the same thing</li>
+    </ol>
+
+    <div class="w-batch" id="dpBatch"></div>
+
+    <div class="w-grid" id="dpGrid"></div>
+
+    <div class="w-work" id="dpWork"></div>
+
+    <div class="w-drift">
+      <span class="lbl">largest difference between any two weight copies</span>
+      <span class="val" id="dpDrift">0.000</span>
+      <span class="note" id="dpDriftNote">all four copies agree on every weight</span>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    var W0 = [3, 5, 2, 4], LR = 0.1, NG = 4, D = 4;
+    var BATCH1 = [
+      [[1,7,2,4],[3,5,4,6]],
+      [[5,3,6,2],[1,7,2,6]],
+      [[2,6,3,5],[6,2,7,1]],
+      [[7,1,8,4],[3,5,4,0]]
+    ];
+    var w, wPrev, batch, phase, lastG, lastPer, lastAvg, lastApplied, lastData, lastRef, seed;
+
+    var el = function (id) { return document.getElementById(id); };
+    function rng() { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; }
+    function samples(n) {
+      if (n === 1) return BATCH1.map(function (g) { return g.map(function (s) { return s.slice(); }); });
+      var out = [];
+      for (var i = 0; i < NG; i++) {
+        var pair = [];
+        for (var j = 0; j < 2; j++) {
+          var s = [];
+          for (var k = 0; k < D; k++) s.push(Math.floor(rng() * 9) + 1);
+          pair.push(s);
+        }
+        out.push(pair);
+      }
+      return out;
+    }
+    function fmt(x, p) { return (Math.abs(x) < 5e-7 ? 0 : x).toFixed(p === undefined ? 2 : p); }
+    function sgn(x) { return (x < 0 ? '\u2212 ' : '+ ') + fmt(Math.abs(x)); }
+    function avgOn() { return el('dpAvg').checked; }
+
+    function reset() {
+      w = []; wPrev = null;
+      for (var i = 0; i < NG; i++) w.push(W0.slice());
+      batch = 0; phase = 0;
+      lastG = lastPer = lastAvg = lastApplied = lastData = lastRef = null;
+      seed = 20260912;
+      render();
+    }
+
+    function computeGradients() {
+      batch++;
+      lastData = samples(batch);
+      lastG = []; lastPer = [];
+      for (var i = 0; i < NG; i++) {
+        var per = [];
+        for (var j = 0; j < lastData[i].length; j++) {
+          var row = [];
+          for (var k = 0; k < D; k++) row.push(w[i][k] - lastData[i][j][k]);
+          per.push(row);
+        }
+        lastPer.push(per);
+        var gi = [];
+        for (var k2 = 0; k2 < D; k2++) {
+          var s = 0;
+          for (var j2 = 0; j2 < per.length; j2++) s += per[j2][k2];
+          gi.push(s / per.length);
+        }
+        lastG.push(gi);
+      }
+      lastAvg = null; lastApplied = null;
+      lastRef = [];
+      for (var k3 = 0; k3 < D; k3++) {
+        var r = 0, n = 0;
+        for (var a = 0; a < NG; a++)
+          for (var b = 0; b < lastData[a].length; b++) { r += w[0][k3] - lastData[a][b][k3]; n++; }
+        lastRef.push(r / n);
+      }
+      phase = 1;
+    }
+
+    function reduce() {
+      if (avgOn()) {
+        lastAvg = [];
+        for (var k = 0; k < D; k++) {
+          var t = 0; for (var i = 0; i < NG; i++) t += lastG[i][k];
+          lastAvg.push(t / NG);
+        }
+        lastApplied = [];
+        for (var m = 0; m < NG; m++) lastApplied.push(lastAvg.slice());
+      } else {
+        lastAvg = null;
+        lastApplied = lastG.map(function (g) { return g.slice(); });
+      }
+      phase = 2;
+    }
+
+    function apply() {
+      wPrev = w.map(function (r) { return r.slice(); });
+      for (var i = 0; i < NG; i++)
+        for (var k = 0; k < D; k++) w[i][k] -= LR * lastApplied[i][k];
+      phase = 3;
+    }
+
+    function step() {
+      if (phase === 0 || phase === 3) { wPrev = null; computeGradients(); }
+      else if (phase === 1) reduce();
+      else apply();
+      render();
+    }
+
+    function panels() {
+      var i, k, j, html = '';
+      for (i = 0; i < NG; i++) {
+        html += '<div class="w-gpu"><h5>GPU ' + i + '</h5>';
+
+        html += '<div class="w-cap">WEIGHTS &nbsp;w</div><div class="w-vec"><span class="w-idx">&nbsp;</span>';
+        for (k = 0; k < D; k++) {
+          var moved = wPrev && Math.abs(w[i][k] - wPrev[i][k]) > 1e-9;
+          html += '<span class="w-cell wt' + (moved ? ' moved' : '') + '">' + fmt(w[i][k], 3) + '</span>';
+        }
+        html += '</div>';
+
+        html += '<div class="w-cap">ITS TWO SAMPLES &nbsp;x</div>';
+        if (lastData) {
+          for (j = 0; j < lastData[i].length; j++) {
+            html += '<div class="w-vec" style="margin-bottom:3px"><span class="w-idx">' +
+              (i * 2 + j + 1) + '</span>';
+            for (k = 0; k < D; k++) html += '<span class="w-cell dt">' + lastData[i][j][k] + '</span>';
+            html += '</div>';
+          }
+        } else {
+          html += '<div class="w-vec"><span class="w-idx">&nbsp;</span><span class="w-cell dt" style="flex:1">&mdash;</span></div>';
+        }
+
+        if (lastPer && phase >= 1) {
+          html += '<div class="w-cap">w &minus; x, ONE PER SAMPLE</div>';
+          for (j = 0; j < lastPer[i].length; j++) {
+            html += '<div class="w-vec" style="margin-bottom:3px"><span class="w-idx">' +
+              (i * 2 + j + 1) + '</span>';
+            for (k = 0; k < D; k++) html += '<span class="w-cell pg">' + fmt(lastPer[i][j][k]) + '</span>';
+            html += '</div>';
+          }
+        }
+
+        html += '<div class="w-cap">MEAN OF THOSE TWO &nbsp;=&nbsp; g</div><div class="w-vec"><span class="w-idx">&nbsp;</span>';
+        for (k = 0; k < D; k++)
+          html += '<span class="w-cell gr">' + (lastG ? fmt(lastG[i][k]) : '\u2014') + '</span>';
+        html += '</div>';
+
+        html += '<div class="w-cap' + (phase >= 2 ? ' hot' : '') + '">WHAT THIS CARD SUBTRACTS</div><div class="w-vec"><span class="w-idx">&nbsp;</span>';
+        for (k = 0; k < D; k++)
+          html += '<span class="w-cell ap' + (phase >= 2 && avgOn() ? ' same' : '') + '">' +
+            (phase >= 2 ? fmt(lastApplied[i][k]) : '\u2014') + '</span>';
+        html += '</div>';
+
+        html += '</div>';
+      }
+      return html;
+    }
+
+    function work() {
+      var k, i, h = '';
+      if (phase === 0) {
+        return '<div class="w-note"><b>Nothing has run yet.</b> All four cards hold the same ' +
+          'four weights, <code>3.000 5.000 2.000 4.000</code>. Press the button to give each card ' +
+          'two samples and let it compute a gradient.</div>';
+      }
+
+      if (phase === 1) {
+        h += '<div class="w-note"><b>Phase 1 \u2014 where the gradients come from.</b> ' +
+          'The loss makes one sample\u2019s gradient simply <code>w \u2212 x</code>: the weight vector ' +
+          'minus that sample. Each card has two samples, so it gets two of those and takes their mean. ' +
+          'The panels above show both subtractions and the mean underneath.</div>';
+        h += '<div class="w-eq"><span class="t">GPU 0, weight 0</span>' +
+          '<code>' + fmt(w[0][0], 0) + ' \u2212 ' + lastData[0][0][0] + ' = ' + fmt(lastPer[0][0][0]) +
+          '</code><code>' + fmt(w[0][0], 0) + ' \u2212 ' + lastData[0][1][0] + ' = ' + fmt(lastPer[0][1][0]) +
+          '</code><code class="r">mean = ' + fmt(lastG[0][0]) + '</code></div>';
+        h += '<div class="w-note dim">All four cards did that with their own data, so all four ' +
+          'gradients differ. No card has sent anything to any other card yet, and no weight has moved.</div>';
+        return h;
+      }
+
+      if (phase === 2 && !avgOn()) {
+        return '<div class="w-note"><b>Phase 2 \u2014 skipped.</b> With averaging off, no card sends ' +
+          'anything. The bottom row of each panel is just that card\u2019s own gradient, and the four ' +
+          'rows still differ.</div>';
+      }
+
+      if (phase === 2) {
+        h += '<div class="w-note"><b>Phase 2 \u2014 what is being averaged.</b> ' +
+          'The four gradient vectors, position by position. Weight 0 of GPU 0 is averaged with ' +
+          'weight 0 of GPUs 1, 2 and 3. Then weight 1 with weight 1, and so on \u2014 four separate ' +
+          'averages, one per weight.</div>';
+        h += '<table class="w-tab"><thead><tr><th></th>';
+        for (k = 0; k < D; k++) h += '<th class="n">weight ' + k + '</th>';
+        h += '</tr></thead><tbody>';
+        for (i = 0; i < NG; i++) {
+          h += '<tr><td>gradient from GPU ' + i + '</td>';
+          for (k = 0; k < D; k++) h += '<td class="n">' + fmt(lastG[i][k]) + '</td>';
+          h += '</tr>';
+        }
+        h += '<tr class="sum"><td>sum of the four</td>';
+        for (k = 0; k < D; k++) {
+          var s = 0; for (i = 0; i < NG; i++) s += lastG[i][k];
+          h += '<td class="n">' + fmt(s) + '</td>';
+        }
+        h += '</tr><tr class="res"><td>divided by 4</td>';
+        for (k = 0; k < D; k++) h += '<td class="n">' + fmt(lastAvg[k]) + '</td>';
+        h += '</tr></tbody></table>';
+        h += '<div class="w-note">All-reduce sends that result <b>back to every card</b>. It is not ' +
+          'collected on one machine \u2014 all four now hold the identical vector <code>' +
+          lastAvg.map(function (x) { return fmt(x); }).join(' ') + '</code>, which is why the bottom ' +
+          'row of all four panels above now reads the same.</div>';
+        return h;
+      }
+
+      // phase 3
+      var u = wPrev[0];
+      h += '<div class="w-note"><b>Phase 3 \u2014 which update, applied where.</b> ' +
+        'Every card now runs <code>w := w \u2212 0.1 g</code> on its own weights, using the vector ' +
+        'from the row above. Nothing is sent; each card does its own subtraction locally.</div>';
+      h += '<table class="w-tab"><thead><tr><th>GPU 0</th>';
+      for (k = 0; k < D; k++) h += '<th class="n">weight ' + k + '</th>';
+      h += '</tr></thead><tbody>';
+      h += '<tr><td>weight before</td>';
+      for (k = 0; k < D; k++) h += '<td class="n">' + fmt(u[k], 3) + '</td>';
+      h += '</tr><tr><td>minus 0.1 &times; ' + (avgOn() ? 'averaged gradient' : 'own gradient') + '</td>';
+      for (k = 0; k < D; k++) h += '<td class="n">' + sgn(-LR * lastApplied[0][k]) + '</td>';
+      h += '</tr><tr class="res"><td>weight after</td>';
+      for (k = 0; k < D; k++) h += '<td class="n">' + fmt(w[0][k], 3) + '</td>';
+      h += '</tr></tbody></table>';
+
+      if (avgOn()) {
+        var diff = 0;
+        for (k = 0; k < D; k++) diff = Math.max(diff, Math.abs(lastAvg[k] - lastRef[k]));
+        h += '<div class="w-note">GPUs 1, 2 and 3 ran exactly the same three rows, because they ' +
+          'started from the same weights and subtracted the same vector. That is why the drift below ' +
+          'is still zero.</div>';
+        h += '<div class="w-note dim">Check: the averaged gradient <code>' +
+          lastAvg.map(function (x) { return fmt(x); }).join(' ') + '</code> equals what one GPU running ' +
+          'all eight samples would have produced, <code>' +
+          lastRef.map(function (x) { return fmt(x); }).join(' ') + '</code>. Difference: <b>' +
+          diff.toFixed(6) + '</b>.</div>';
+      } else {
+        h += '<div class="w-note">The other three cards subtracted <em>different</em> vectors, so they ' +
+          'now hold different weights. The drift below is no longer zero.</div>';
+      }
+      h += '<div class="w-note dim"><b>On to the next batch.</b> These updated weights are the ' +
+        'starting point \u2014 press the button and each card draws two fresh samples and computes ' +
+        '<code>w \u2212 x</code> against <em>these</em> numbers, not the original ones. That loop is ' +
+        'the whole of training.</div>';
+      return h;
+    }
+
+    function batchStrip() {
+      if (!lastData) {
+        return '<div class="w-bcap">BATCH — 8 SAMPLES, SPLIT 2 PER GPU</div>' +
+          '<div class="w-bnote">No batch drawn yet.</div>';
+      }
+      var h = '<div class="w-bcap">BATCH ' + batch + ' — 8 SAMPLES, SPLIT 2 PER GPU</div><div class="w-brow">';
+      for (var i = 0; i < NG; i++) {
+        h += '<div class="w-bgrp"><span class="w-btag">to GPU ' + i + '</span>';
+        for (var j = 0; j < lastData[i].length; j++) {
+          h += '<span class="w-bs"><i>' + (i * 2 + j + 1) + '</i>' +
+            lastData[i][j].join(' ') + '</span>';
+        }
+        h += '</div>';
+      }
+      h += '</div><div class="w-bnote">Eight distinct samples. Each goes to exactly one card — ' +
+        'the batch is <b>divided</b>, not copied. Two samples each is why every gradient below is a ' +
+        'mean of two.</div>';
+      return h;
+    }
+
+    function render() {
+      el('dpBatch').innerHTML = batchStrip();
+      el('dpGrid').innerHTML = panels();
+      el('dpWork').innerHTML = work();
+
+      var ph = el('dpPhases').children, i, k;
+      for (i = 0; i < ph.length; i++)
+        ph[i].className = (i + 1 === phase) ? 'now' : (i + 1 < phase ? 'done' : '');
+
+      var drift = 0;
+      for (k = 0; k < D; k++) {
+        var lo = Infinity, hi = -Infinity;
+        for (i = 0; i < NG; i++) { lo = Math.min(lo, w[i][k]); hi = Math.max(hi, w[i][k]); }
+        drift = Math.max(drift, hi - lo);
+      }
+      var dv = el('dpDrift');
+      dv.textContent = drift.toFixed(3);
+      dv.className = 'val' + (drift > 1e-9 ? ' bad' : '');
+      el('dpDriftNote').textContent = drift > 1e-9
+        ? 'the copies have drifted apart \u2014 they are no longer one model'
+        : 'all four copies agree on every weight';
+
+      var btn = el('dpStep');
+      btn.textContent = phase === 0 ? 'Compute local gradients'
+        : phase === 1 ? (avgOn() ? 'Average the four gradients' : 'Skip averaging')
+        : phase === 2 ? 'Subtract it from the weights'
+        : 'Next batch';
+
+      el('dpStatus').textContent = phase === 0 ? 'batch 0 \u00b7 not yet stepped'
+        : 'batch ' + batch + ' \u00b7 phase ' + phase + ' of 3';
+    }
+
+    el('dpStep').addEventListener('click', step);
+    el('dpReset').addEventListener('click', reset);
+    el('dpAvg').addEventListener('change', function () {
+      el('dpAvgLabel').classList.toggle('on', this.checked);
+      if (phase >= 2) { phase = 1; lastAvg = null; lastApplied = null; }
+      render();
+    });
+    reset();
+  })();
+  </script>
+
+  <p>So the answer to where the average goes is: back to everyone. All-reduce is not a
+  gather-to-one-card operation. Every card ends the exchange holding the same averaged vector,
+  and then every card does its own subtraction locally. No card is in charge, and no card has
+  anything the others lack.</p>
+
+  <p>That is what keeps the copies identical. They began identical, and they applied the same
+  number to the same starting value, so they end identical &mdash; not approximately, exactly.
+  The drift figure stays at 0.000 however many batches you run.</p>
+
+  <p>Turn averaging off and phase 2 exchanges nothing. Each card applies its own gradient, the
+  bottom rows stay different, and the copies separate on the first step. They are then four
+  different models that happen to share a starting point.</p>
+
+  <h2>Why the averaging is what makes it correct</h2>
+
+  <p>The averaging step is not bookkeeping — it is the thing that makes the arrangement
+  mathematically defensible. Averaging the gradients from eight GPUs, each of which processed
+  32 sequences, produces exactly the gradient that a single GPU would have produced from all
+  256 sequences at once.</p>
+
+  <div class="arith">
+    <div><b class="v">32</b><span class="k">sequences per GPU</span></div>
+    <div class="op">&times;</div>
+    <div><b class="v">8</b><span class="k">GPUs</span></div>
+    <div class="op">=</div>
+    <div><b class="v hot">256</b><span class="k">sequences, one gradient</span></div>
+  </div>
+
+  <p>The distributed run is therefore identical to a single-GPU run on a batch eight times
+  larger. This is the property that lets a training recipe move from one GPU to many without
+  changing what the model learns. Nothing about the result depends on how many cards were
+  involved.</p>
+
+  <div class="callout">
+    <h4>Why this matters more than it sounds</h4>
+    <p>If the result depended on the card count, every change to the cluster would mean
+    retuning the learning rate and revalidating the recipe. Because it does not, the number of
+    GPUs becomes a scheduling decision rather than a modelling one.</p>
+  </div>
+
+  <h2>The batch the optimizer sees</h2>
+
+  <p>It is the product of three numbers, and it is worth being able to state which one you are
+  turning.</p>
+
+  <div class="panel bolted" style="margin:26px 0 22px">
+    <div class="nameplate">Global batch</div>
+    <p style="font-family:var(--mono);font-size:15px;margin:0;color:var(--cream)">
+      global batch = sequences per GPU &times; GPUs &times; accumulation steps</p>
+  </div>
+
+  <table class="ledger">
+    <caption>The three dials</caption>
+    <thead><tr><th>Dial</th><th>Limited by</th><th class="n">Our run</th></tr></thead>
+    <tbody>
+      <tr><td>sequences per GPU</td><td>activation memory on one card</td><td class="n">32</td></tr>
+      <tr><td>GPUs</td><td>how much hardware you have</td><td class="n">8</td></tr>
+      <tr><td>accumulation steps</td><td>nothing but time</td><td class="n">1</td></tr>
+      <tr class="total"><td>global batch</td><td></td><td class="n">256</td></tr>
+    </tbody>
+  </table>
+
+  <p>Accumulation steps are repeats of the forward and backward pass before the weights are
+  updated, used when the desired batch is larger than what fits in memory at once. Gradients
+  from each repeat are added up, and only then is the update applied.</p>
+
+  <figure class="figure">
+    <svg class="diagram" viewBox="0 0 860 150" xmlns="http://www.w3.org/2000/svg" role="img"
+         aria-label="Four accumulation steps adding gradients before one weight update">
+      <text class="d-small" x="0" y="14">accumulation steps = 4, so the optimizer sees 1,024 sequences</text>
+
+      <g>
+        <rect class="d-box" x="0" y="30" width="150" height="46" rx="3"/>
+        <rect class="d-box" x="170" y="30" width="150" height="46" rx="3"/>
+        <rect class="d-box" x="340" y="30" width="150" height="46" rx="3"/>
+        <rect class="d-box" x="510" y="30" width="150" height="46" rx="3"/>
+        <rect class="d-box-hot" x="700" y="30" width="160" height="46" rx="3"/>
+      </g>
+      <g class="d-mono-sm" text-anchor="middle" fill="#C4BCAC">
+        <text x="75" y="58">fwd + bwd</text><text x="245" y="58">fwd + bwd</text>
+        <text x="415" y="58">fwd + bwd</text><text x="585" y="58">fwd + bwd</text>
+      </g>
+      <text class="d-mono-sm d-hot" x="780" y="58" text-anchor="middle">update</text>
+
+      <g class="d-wire">
+        <path d="M150 53 L170 53"/><path d="M320 53 L340 53"/>
+        <path d="M490 53 L510 53"/><path d="M660 53 L700 53"/>
+      </g>
+
+      <text class="d-small" x="0" y="104">gradients accumulate across all four &mdash; no weights change until the end</text>
+      <path class="d-wire-dim" d="M0 116 L660 116"/>
+      <text class="d-mono-sm" x="0" y="140" fill="#706C65">32 &times; 8 &times; 4 = 1,024</text>
+    </svg>
+    <figcaption>Accumulation buys batch size with time instead of memory. The weights sit
+    untouched until the last repeat finishes.</figcaption>
+  </figure>
+
+  <p>So the three dials trade against different resources. Sequences per GPU costs activation
+  memory, GPUs cost hardware, accumulation costs wall-clock time. Any of them can be turned to
+  reach a target global batch, and the optimizer cannot tell which one you used.</p>
+
+  <p>What data parallelism does not touch is the memory from the first page. Every one of those
+  eight cards is still carrying the full sixteen bytes per weight, and seven of the eight
+  copies are redundant. That is the next page.</p>
+
+  <div class="pager">
+    <a href="05-what-multiplies.html"><span>BACK</span>What multiplies</a>
+    <a class="next" href="07-collectives.html"><span>NEXT</span>Collective operations</a>
+  </div>
+</main>
+
+</body>
+</html>

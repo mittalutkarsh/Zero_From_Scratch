@@ -1,0 +1,2396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The cost of communication — Distributed Training I</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+/* ==========================================================
+   Distributed Training I — "Rack & Ledger"
+   Graphite hardware world + cream ledger bands for memory
+   ========================================================== */
+
+
+:root {
+  --graphite:   #1C1F22;
+  --panel:      #24282C;
+  --panel-hi:   #2E3338;
+  --rail:       #3A4045;
+  --copper:     #B87333;
+  --copper-dim: #7A4D24;
+  --cream:      #EDEAE3;
+  --cream-dim:  #A9A49B;
+  --cream-mute: #706C65;
+
+  /* the four bands — distinct hues, muted to sit in the graphite world */
+  --b-weight: #5E8CA0;   /* steel blue  — weight, bf16 */
+  --b-grad:   #D19A4A;   /* amber       — gradient, bf16 */
+  --b-master: #8B7BA8;   /* violet      — master copy, fp32 */
+  --b-opt:    #7C9468;   /* sage        — optimizer averages */
+
+
+  --sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --cond: 'Barlow Condensed', 'Inter', sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --measure: 68ch;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--graphite);
+  color: var(--cream);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- rack rail: the fixed left edge of the machine ---------- */
+
+.rack {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: 232px;
+  background: var(--panel);
+  border-right: 1px solid var(--rail);
+  padding: 26px 0 26px 0;
+  overflow-y: auto;
+}
+
+.rack-plate {
+  padding: 0 20px 20px;
+  border-bottom: 1px solid var(--rail);
+  margin-bottom: 14px;
+}
+
+.rack-plate a {
+  color: var(--cream);
+  text-decoration: none;
+  font-family: var(--cond);
+  font-size: 25px;
+  line-height: 1.1;
+  letter-spacing: 0.01em;
+  display: block;
+}
+
+.rack-plate span {
+  display: block;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--cream-mute);
+  margin-top: 7px;
+  letter-spacing: 0.04em;
+}
+
+/* each nav row is a blade in the rack */
+.blade {
+  display: flex;
+  align-items: baseline;
+  gap: 11px;
+  padding: 9px 20px 9px 17px;
+  color: var(--cream-dim);
+  text-decoration: none;
+  font-family: var(--cond);
+  font-size: 17px;
+  letter-spacing: 0.012em;
+  border-left: 3px solid transparent;
+  transition: background 120ms linear, color 120ms linear;
+}
+
+.blade u { /* the slot number, in mono */
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--cream-mute);
+  text-decoration: none;
+  min-width: 20px;
+}
+
+.blade:hover { background: var(--panel-hi); color: var(--cream); }
+
+.blade[aria-current="page"] {
+  color: var(--cream);
+  background: var(--panel-hi);
+  border-left-color: var(--copper);
+}
+
+.blade[aria-current="page"] u { color: var(--copper); }
+
+.blade.pending { opacity: 0.42; pointer-events: none; }
+
+.rack-group {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--cream-mute);
+  letter-spacing: 0.09em;
+  padding: 18px 20px 6px;
+}
+
+/* ---------- page body ---------- */
+
+main {
+  margin-left: 232px;
+  padding: 64px 56px 140px;
+  max-width: calc(var(--measure) + 340px);
+}
+
+.slot {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--copper);
+  letter-spacing: 0.1em;
+  margin-bottom: 14px;
+}
+
+h1 {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: clamp(40px, 6vw, 62px);
+  line-height: 1.02;
+  letter-spacing: -0.005em;
+  margin: 0 0 28px;
+  max-width: 18ch;
+}
+
+h2 {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 30px;
+  line-height: 1.15;
+  margin: 60px 0 16px;
+  color: var(--cream);
+}
+
+h3 {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 21px;
+  margin: 36px 0 10px;
+  color: var(--cream);
+}
+
+p, ul, ol { max-width: var(--measure); }
+p { margin: 0 0 20px; }
+li { margin-bottom: 9px; }
+
+.lede {
+  font-size: 20.5px;
+  line-height: 1.55;
+  color: var(--cream);
+  border-left: 2px solid var(--copper);
+  padding-left: 20px;
+  margin-bottom: 34px;
+}
+
+strong { font-weight: 600; color: #fff; }
+em { font-style: italic; color: var(--cream); }
+
+code, .num {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  color: var(--copper);
+  background: rgba(184, 115, 51, 0.10);
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+
+a.inline { color: var(--copper); }
+
+/* ---------- ledger table: ruled lines, memory accounting ---------- */
+
+.ledger {
+  width: 100%;
+  max-width: var(--measure);
+  border-collapse: collapse;
+  margin: 28px 0 30px;
+  font-size: 15.5px;
+}
+
+.ledger caption {
+  text-align: left;
+  font-family: var(--cond);
+  font-size: 18px;
+  color: var(--cream-dim);
+  padding-bottom: 9px;
+}
+
+.ledger th {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 15px;
+  color: var(--cream-mute);
+  text-align: left;
+  padding: 0 12px 7px 0;
+  border-bottom: 1px solid var(--rail);
+}
+
+.ledger th.n, .ledger td.n {
+  text-align: right;
+  font-family: var(--mono);
+  padding-right: 0;
+}
+
+.ledger td {
+  padding: 11px 12px 11px 0;
+  border-bottom: 1px solid rgba(58, 64, 69, 0.65);
+  color: var(--cream-dim);
+}
+
+.ledger td.n { color: var(--cream); font-size: 14px; }
+
+.ledger tr.total td {
+  border-bottom: none;
+  border-top: 2px solid var(--copper);
+  color: #fff;
+  font-weight: 600;
+  padding-top: 12px;
+}
+
+.ledger tr.total td.n { color: var(--copper); font-weight: 700; }
+
+/* a small copper swatch marking which band a row belongs to */
+.swatch {
+  display: inline-block;
+  width: 9px; height: 9px;
+  border-radius: 1px;
+  margin-right: 10px;
+  vertical-align: 0;
+}
+.sw-param { background: var(--b-weight); }
+.sw-grad  { background: var(--b-grad); }
+.sw-opt   { background: var(--b-master); }
+
+/* ---------- hardware panel: a blade drawn as an object ---------- */
+
+.figure {
+  margin: 36px 0 40px;
+  max-width: 860px;
+}
+
+.figure figcaption {
+  font-size: 14.5px;
+  color: var(--cream-mute);
+  margin-top: 12px;
+  max-width: 62ch;
+  line-height: 1.55;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--rail);
+  border-radius: 3px;
+  padding: 26px 28px;
+}
+
+/* screw-hole corners, so panels read as bolted hardware */
+.panel.bolted { position: relative; }
+.panel.bolted::before,
+.panel.bolted::after {
+  content: "";
+  position: absolute;
+  top: 9px; width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--rail);
+}
+.panel.bolted::before { left: 9px; }
+.panel.bolted::after  { right: 9px; }
+
+.nameplate {
+  font-family: var(--cond);
+  font-size: 14px;
+  letter-spacing: 0.05em;
+  color: var(--cream-mute);
+  margin-bottom: 16px;
+}
+
+/* ---------- cycle comparison (CPU vs GPU) ---------- */
+
+.cycles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(268px, 1fr));
+  gap: 20px;
+  margin: 30px 0 12px;
+}
+
+.cyc-head {
+  font-family: var(--cond);
+  font-size: 20px;
+  color: var(--cream);
+  margin-bottom: 3px;
+}
+.cyc-sub {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--cream-mute);
+  margin-bottom: 18px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  padding: 8px 0;
+  border-bottom: 1px dashed rgba(58, 64, 69, 0.8);
+}
+.row:last-child { border-bottom: none; }
+
+.tick {
+  font-size: 10.5px;
+  color: var(--cream-mute);
+  min-width: 52px;
+}
+.tick.same { color: var(--copper); }
+
+.expr { color: var(--cream); }
+.arrow { color: var(--copper-dim); }
+.res { color: var(--copper); }
+
+.lane-stack .row { border-bottom: none; padding: 5px 0; }
+.lane-stack {
+  border-left: 2px solid var(--copper);
+  padding-left: 16px;
+  margin-left: 4px;
+}
+
+/* ---------- callout ---------- */
+
+.callout {
+  border: 1px solid var(--copper-dim);
+  border-left-width: 3px;
+  background: rgba(184, 115, 51, 0.065);
+  border-radius: 2px;
+  padding: 20px 24px;
+  margin: 34px 0;
+  max-width: var(--measure);
+}
+.callout h4 {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 19px;
+  margin: 0 0 8px;
+  color: var(--cream);
+}
+.callout p:last-child { margin-bottom: 0; }
+
+/* ---------- arithmetic strip: the big settling number ---------- */
+
+.arith {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 30px;
+  margin: 34px 0 36px;
+  padding: 24px 0;
+  border-top: 1px solid var(--rail);
+  border-bottom: 1px solid var(--rail);
+}
+.arith div { line-height: 1.2; }
+.arith .v {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 30px;
+  color: var(--cream);
+  display: block;
+}
+.arith .v.hot { color: var(--copper); }
+.arith .k {
+  font-family: var(--cond);
+  font-size: 14.5px;
+  color: var(--cream-mute);
+  display: block;
+  margin-top: 6px;
+}
+.arith .op {
+  font-family: var(--mono);
+  font-size: 24px;
+  color: var(--cream-mute);
+  padding-bottom: 26px;
+}
+
+/* ---------- spec list ---------- */
+
+.spec {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px;
+  background: var(--rail);
+  border: 1px solid var(--rail);
+  margin: 26px 0 8px;
+  max-width: 760px;
+}
+.spec > div { background: var(--panel); padding: 16px 18px; }
+.spec b {
+  font-family: var(--mono);
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--cream);
+  display: block;
+}
+.spec span {
+  font-family: var(--cond);
+  font-size: 14px;
+  color: var(--cream-mute);
+  display: block;
+  margin-top: 5px;
+}
+
+/* ---------- diagrams ---------- */
+
+.diagram { width: 100%; height: auto; display: block; }
+
+.d-label { font-family: var(--cond); font-size: 15px; fill: var(--cream); }
+.d-small { font-family: var(--cond); font-size: 12.5px; fill: var(--cream-mute); }
+.d-mono  { font-family: var(--mono); font-size: 12px; fill: var(--cream); }
+.d-mono-sm { font-family: var(--mono); font-size: 10.5px; fill: var(--cream-mute); }
+.d-hot   { fill: var(--copper); }
+.d-wire  { stroke: var(--copper); stroke-width: 1.6; fill: none; }
+.d-wire-dim { stroke: var(--rail); stroke-width: 1.4; fill: none; }
+.d-box   { fill: var(--panel-hi); stroke: var(--rail); stroke-width: 1; }
+.d-box-hot { fill: rgba(184,115,51,0.12); stroke: var(--copper); stroke-width: 1.2; }
+.d-mem   { fill: #1A1D20; stroke: var(--rail); stroke-width: 1; }
+
+/* ---------- interactive widget ---------- */
+
+.widget {
+  background: var(--panel);
+  border: 1px solid var(--rail);
+  border-radius: 3px;
+  padding: 22px 24px 24px;
+  margin: 34px 0 14px;
+}
+
+.w-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 22px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--rail);
+}
+
+.w-btn {
+  font-family: var(--cond);
+  font-size: 16px;
+  letter-spacing: 0.03em;
+  color: var(--graphite);
+  background: var(--copper);
+  border: 1px solid var(--copper);
+  border-radius: 2px;
+  padding: 7px 20px;
+  cursor: pointer;
+}
+.w-btn:hover { background: #C9843D; }
+.w-btn.ghost {
+  background: transparent;
+  color: var(--cream-dim);
+  border-color: var(--rail);
+}
+.w-btn.ghost:hover { color: var(--cream); border-color: var(--cream-mute); }
+
+.w-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--cond);
+  font-size: 16px;
+  color: var(--cream-dim);
+  cursor: pointer;
+  padding: 6px 14px 6px 10px;
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+}
+.w-toggle input { accent-color: var(--copper); width: 15px; height: 15px; cursor: pointer; }
+.w-toggle.on { color: var(--cream); border-color: var(--copper-dim); }
+
+.w-status {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--cream-mute);
+  letter-spacing: 0.04em;
+  margin-left: auto;
+}
+
+.widget { overflow-x: auto; }
+
+.w-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 680px;
+}
+
+.w-gpu {
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 11px 10px 13px;
+  min-width: 0;
+  background: var(--graphite);
+}
+.w-gpu h5 {
+  font-family: var(--cond);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--cream);
+  margin: 0 0 10px;
+  letter-spacing: 0.03em;
+}
+.w-cap {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--cream-mute);
+  margin: 10px 0 5px;
+}
+.w-cap:first-of-type { margin-top: 0; }
+
+.w-vec { display: flex; gap: 4px; }
+.w-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: center;
+  padding: 5px 1px;
+  border-radius: 2px;
+  background: var(--panel-hi);
+  color: var(--cream);
+}
+.w-cell.wt { background: rgba(237,234,227,0.12); }
+.w-cell.gr { background: rgba(184,115,51,0.14); color: var(--copper); }
+.w-cell.dt { background: var(--panel); color: var(--cream-dim); font-size: 11px; }
+
+.w-avg {
+  margin-top: 14px;
+  border: 1px solid var(--copper-dim);
+  background: rgba(184,115,51,0.07);
+  border-radius: 2px;
+  padding: 11px 12px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.w-avg .lbl {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--copper);
+  min-width: 128px;
+}
+.w-avg .w-vec { flex: 1; }
+.w-avg .w-cell { background: transparent; color: var(--copper); font-size: 13px; }
+
+.w-cell.ap { background: var(--panel); color: var(--cream-mute); }
+.w-cell.ap.same { background: rgba(184,115,51,0.22); color: var(--copper); font-weight: 500; }
+.w-cell.wt.moved { background: rgba(184,115,51,0.20); color: #fff; }
+.w-cell.pg { background: var(--panel); color: var(--cream-dim); }
+
+.w-cap.hot { color: var(--copper); }
+
+.w-phases {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 18px;
+  padding: 0;
+}
+.w-phases li {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--cream-mute);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 5px 12px;
+  margin: 0;
+}
+.w-phases li.now {
+  color: var(--copper);
+  border-color: var(--copper);
+  background: rgba(184,115,51,0.10);
+}
+.w-phases li.done { color: var(--cream-dim); border-color: var(--cream-mute); }
+
+.w-work { margin-top: 18px; }
+
+/* batch strip: the eight samples, grouped by destination card */
+.w-batch {
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  background: var(--graphite);
+  padding: 12px 14px 13px;
+  margin-bottom: 14px;
+}
+.w-bcap {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  color: var(--cream-mute);
+  margin-bottom: 10px;
+}
+.w-brow { display: flex; flex-wrap: wrap; gap: 10px; }
+.w-bgrp {
+  flex: 1 1 160px;
+  border: 1px solid var(--rail);
+  border-left: 2px solid var(--copper-dim);
+  border-radius: 2px;
+  padding: 8px 9px 9px;
+}
+.w-btag {
+  display: block;
+  font-family: var(--cond);
+  font-size: 13px;
+  color: var(--copper);
+  letter-spacing: 0.03em;
+  margin-bottom: 6px;
+}
+.w-bs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--cream);
+  background: var(--panel-hi);
+  border-radius: 2px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  letter-spacing: 0.08em;
+}
+.w-bs:last-child { margin-bottom: 0; }
+.w-bs i {
+  font-style: normal;
+  font-size: 9.5px;
+  color: var(--cream-mute);
+  min-width: 10px;
+  letter-spacing: 0;
+}
+.w-bnote {
+  font-size: 14px;
+  color: var(--cream-mute);
+  line-height: 1.55;
+  margin-top: 11px;
+}
+.w-bnote b { color: var(--cream); font-weight: 600; }
+
+/* gutter so panel rows line up with their sample numbers */
+.w-idx {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--cream-mute);
+  min-width: 9px;
+  text-align: right;
+  align-self: center;
+}
+
+.w-note {
+  font-size: 15px;
+  line-height: 1.62;
+  color: var(--cream-dim);
+  margin: 0 0 12px;
+  max-width: none;
+}
+.w-note.dim { color: var(--cream-mute); font-size: 14px; }
+.w-note b { color: var(--cream); font-weight: 600; }
+.w-note em { color: var(--copper); font-style: normal; }
+.w-note code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: rgba(184,115,51,0.10);
+  color: var(--copper);
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+
+.w-eq {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  background: var(--graphite);
+}
+.w-eq .t {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  color: var(--cream-mute);
+  margin-right: 4px;
+}
+.w-eq code {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--cream);
+  background: var(--panel-hi);
+  padding: 4px 10px;
+  border-radius: 2px;
+}
+.w-eq code.r { background: rgba(184,115,51,0.18); color: var(--copper); }
+
+.w-tab {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 14px;
+  font-size: 14px;
+}
+.w-tab th {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 13.5px;
+  color: var(--cream-mute);
+  text-align: left;
+  padding: 0 10px 6px 0;
+  border-bottom: 1px solid var(--rail);
+}
+.w-tab th.n, .w-tab td.n { text-align: right; font-family: var(--mono); font-size: 12.5px; }
+.w-tab td {
+  padding: 7px 10px 7px 0;
+  border-bottom: 1px solid rgba(58,64,69,0.6);
+  color: var(--cream-dim);
+}
+.w-tab td.n { color: var(--cream); }
+.w-tab tr.sum td { border-top: 1px solid var(--rail); color: var(--cream); }
+.w-tab tr.res td {
+  border-bottom: none;
+  border-top: 2px solid var(--copper);
+  color: #fff;
+  font-weight: 600;
+}
+.w-tab tr.res td.n { color: var(--copper); }
+
+.w-drift {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 18px;
+  padding: 0;
+}
+.w-phases li {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--cream-mute);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 5px 12px;
+  margin: 0;
+}
+.w-phases li.now {
+  color: var(--copper);
+  border-color: var(--copper);
+  background: rgba(184,115,51,0.10);
+}
+.w-phases li.done { color: var(--cream-dim); border-color: var(--cream-mute); }
+
+.w-explain {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--cream-dim);
+  margin: 16px 0 0;
+  max-width: none;
+}
+.w-explain b {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--cream);
+  font-weight: 500;
+}
+.w-explain em { color: var(--copper); font-style: normal; }
+
+.w-drift {
+  margin-top: 14px;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rail);
+}
+.w-drift .lbl { font-family: var(--cond); font-size: 15px; color: var(--cream-dim); }
+.w-drift .val {
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--cream);
+}
+.w-drift .val.bad { color: var(--copper); }
+.w-drift .note { font-family: var(--cond); font-size: 14.5px; color: var(--cream-mute); }
+
+.w-foot {
+  margin-top: 12px;
+  font-size: 14px;
+  color: var(--cream-mute);
+  line-height: 1.6;
+}
+.w-foot b { font-family: var(--mono); font-size: 12.5px; color: var(--cream); font-weight: 500; }
+
+@media (max-width: 880px) {
+  .w-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 420px; }
+  .w-avg { flex-direction: column; align-items: stretch; gap: 8px; }
+  .w-avg .lbl { min-width: 0; }
+}
+
+/* ---------- reduce-scatter / all-gather stepper ---------- */
+
+.rs-wrap { overflow-x: auto; }
+
+.rs-tab {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 4px;
+  margin: 4px 0 6px;
+}
+.rs-tab th {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  color: var(--cream-mute);
+  font-weight: 400;
+  text-align: center;
+  padding-bottom: 3px;
+}
+.rs-tab th.n { text-align: center; }
+.rs-tab td.rs-r {
+  font-family: var(--cond);
+  font-size: 15px;
+  color: var(--cream-dim);
+  white-space: nowrap;
+  padding-right: 8px;
+  width: 1%;
+}
+.rs-c {
+  font-family: var(--mono);
+  font-size: 14px;
+  text-align: center;
+  padding: 11px 6px;
+  border-radius: 2px;
+  background: var(--panel-hi);
+  color: var(--cream-mute);
+  border: 1px solid transparent;
+}
+.rs-c.done { background: rgba(237,234,227,0.14); color: var(--cream); }
+.rs-c.own  { background: rgba(184,115,51,0.22); color: var(--copper); font-weight: 700; }
+.rs-c.empty { background: var(--graphite); color: var(--rail); }
+.rs-c.moved { border-color: var(--copper); }
+
+.w-btn:disabled { opacity: 0.35; cursor: default; }
+
+
+/* ---------- collectives stepper cells ---------- */
+
+.w-cell.part  { background: var(--panel-hi); color: var(--cream-mute); }
+.w-cell.full  { background: rgba(237,234,227,0.16); color: var(--cream); }
+.w-cell.owns  { background: rgba(184,115,51,0.24); color: var(--copper); font-weight: 700; }
+.w-cell.none  { background: var(--graphite); color: var(--rail); }
+.w-cell.send  { background: rgba(184,115,51,0.18); color: var(--copper); }
+.w-cell.recv  { background: rgba(237,234,227,0.10); color: var(--cream); }
+.w-cell.blank { background: transparent; color: var(--rail); }
+.w-cell.src {
+  background: transparent;
+  color: var(--cream-mute);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  padding: 3px 0;
+}
+.w-cell.src.ok { color: var(--copper); }
+
+.w-cap2 {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  color: var(--copper);
+  margin: 18px 0 8px;
+}
+
+.w-tab.lg td.hit {
+  background: rgba(184,115,51,0.16);
+  color: var(--copper);
+  border-radius: 2px;
+}
+.w-tab.lg td.hit b { color: var(--copper); }
+.w-tab.lg td.dimc { color: var(--cream-mute); }
+.w-tab.lg td.dimc span { font-size: 10px; color: var(--rail); }
+.w-tab.lg td, .w-tab.lg th { font-size: 12px; }
+.w-tab.lg td.n { font-size: 11.5px; }
+
+.w-pre {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--cream);
+  background: var(--graphite);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 13px 15px;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.cb-ring { width: 100%; height: auto; display: block; margin: 4px 0 14px; max-width: 780px; }
+.cb-rn { font-family: var(--mono); font-size: 13px; fill: var(--cream); }
+.cb-rl { font-family: var(--mono); font-size: 11px; fill: var(--copper); }
+.w-cell.moved { outline: 1px solid var(--copper); outline-offset: -1px; }
+
+.w-sum {
+  margin-top: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--cream-dim);
+  border-top: 1px solid var(--rail);
+  padding-top: 9px;
+  line-height: 1.45;
+}
+.w-sum b { color: var(--copper); font-weight: 700; }
+.w-cell.hdr {
+  background: transparent;
+  color: var(--cream-mute);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  padding: 0 0 3px;
+}
+.w-hdr { margin-bottom: 0; }
+.w-sum span { color: var(--cream-mute); }
+.w-sum.idle { color: var(--cream-mute); }
+
+/* ---------- tabbed matrix overview ---------- */
+
+.cb-overview {
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid var(--rail);
+}
+.mx-jump {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  color: var(--cream-mute);
+  margin-right: 4px;
+}
+.mx-tab.passed { color: var(--cream-dim); border-color: var(--cream-mute); }
+
+.mx-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--rail);
+}
+.mx-tab {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--cream-mute);
+  background: transparent;
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 7px 13px;
+  cursor: pointer;
+}
+.mx-tab:hover { color: var(--cream); }
+.mx-tab.on {
+  color: var(--copper);
+  border-color: var(--copper);
+  background: rgba(184,115,51,0.10);
+}
+.mx-cap {
+  font-family: var(--cond);
+  font-size: 15px;
+  color: var(--cream-dim);
+  margin-left: 8px;
+}
+
+.mx-split { display: flex; gap: 22px; flex-wrap: wrap; }
+.mx-main { flex: 1 1 440px; min-width: 0; }
+.mx-side { flex: 0 1 290px; min-width: 0; }
+.mx-note {
+  font-family: var(--cond);
+  font-size: 13.5px;
+  color: var(--cream-mute);
+  margin-top: 8px;
+}
+
+.mx-meter { margin-top: 12px; }
+.mx-bar {
+  height: 4px;
+  background: var(--rail);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.mx-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--copper);
+  transition: width 200ms ease;
+}
+.mx-mlabel {
+  font-family: var(--cond);
+  font-size: 13.5px;
+  color: var(--cream-mute);
+  margin-top: 7px;
+}
+.mx-mlabel b { font-family: var(--mono); font-size: 13px; color: var(--copper); }
+
+.mx-c.waiting { background: var(--graphite); color: var(--cream-mute); opacity: 0.45; }
+
+.mx-tab-grid { width: 100%; border-collapse: separate; border-spacing: 5px; }
+.mx-tab-grid th {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  font-weight: 400;
+  color: var(--cream-mute);
+  padding-bottom: 3px;
+}
+.mx-tab-grid th.r {
+  font-family: var(--cond);
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  text-align: right;
+  padding-right: 8px;
+  white-space: nowrap;
+  width: 1%;
+}
+.mx-c {
+  position: relative;
+  font-family: var(--mono);
+  font-size: 15px;
+  text-align: center;
+  padding: 14px 4px;
+  border-radius: 2px;
+  border: 1px solid transparent;
+}
+.mx-tab-grid.small .mx-c { font-size: 11.5px; padding: 7px 2px; }
+.mx-c i {
+  display: block;
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  color: var(--copper);
+  margin-top: 3px;
+}
+.mx-c.own   { background: rgba(237,234,227,0.10); color: var(--cream); }
+.mx-c.done  { background: rgba(184,115,51,0.16); color: var(--copper); border-color: var(--copper-dim); }
+.mx-c.stale { background: var(--graphite); color: var(--rail); }
+.mx-c.blank {
+  background: transparent;
+  border: 1px dashed var(--rail);
+  color: transparent;
+}
+.mx-tog {
+  font-size: 13.5px;
+  padding: 5px 11px 5px 8px;
+  margin-left: auto;
+}
+.mx-tog input { width: 13px; height: 13px; }
+.mx-sum {
+  font-family: var(--mono);
+  font-size: 13px;
+  text-align: center;
+  padding: 9px 2px;
+  color: var(--cream);
+  border-top: 2px solid var(--copper);
+}
+/* faint per-column tint so a column reads as a unit */
+.c0 { border-left: 2px solid rgba(237,234,227,0.30); }
+.c1 { border-left: 2px solid rgba(196,188,172,0.30); }
+.c2 { border-left: 2px solid rgba(142,135,120,0.34); }
+.c3 { border-left: 2px solid rgba(110,104,92,0.40); }
+
+@media (max-width: 880px) {
+  .mx-side { flex: 1 1 100%; }
+}
+
+/* ---------- carry-forward note ---------- */
+
+.carry {
+  border-left: 2px solid var(--copper);
+  background: rgba(184,115,51,0.05);
+  padding: 16px 20px;
+  margin: 34px 0;
+  max-width: var(--measure);
+  font-style: italic;
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--cream-dim);
+}
+.carry b {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--cream);
+  letter-spacing: 0.01em;
+}
+
+/* ---------- cost calculator ---------- */
+
+.cc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  color: var(--cream-mute);
+}
+.cc-field select {
+  font-family: var(--cond);
+  font-size: 15px;
+  color: var(--cream);
+  background: var(--panel-hi);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.cc-field select:hover { border-color: var(--cream-mute); }
+
+.cc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 22px;
+}
+.cc-box {
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  background: var(--graphite);
+  padding: 13px 15px 15px;
+}
+.cc-big {
+  font-family: var(--mono);
+  font-size: 25px;
+  font-weight: 700;
+  color: var(--cream);
+  margin-top: 6px;
+}
+.cc-big.hot { color: var(--copper); }
+.cc-sub {
+  font-family: var(--cond);
+  font-size: 13.5px;
+  color: var(--cream-mute);
+  margin-top: 5px;
+}
+
+.cc-bars { margin-bottom: 4px; }
+.cc-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+.cc-lbl {
+  font-family: var(--cond);
+  font-size: 15px;
+  color: var(--cream-dim);
+  min-width: 132px;
+}
+.cc-track {
+  flex: 1;
+  height: 20px;
+  background: var(--graphite);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.cc-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  transition: width 220ms ease;
+}
+.cc-fill.compute { background: rgba(237,234,227,0.30); }
+.cc-fill.comm { background: var(--copper); }
+.cc-val {
+  font-family: var(--mono);
+  font-size: 13.5px;
+  color: var(--cream);
+  min-width: 62px;
+  text-align: right;
+}
+
+/* ---------- pinned-axis cost widget ---------- */
+
+.cw-intro {
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: var(--cream-mute);
+  margin: 0 0 20px;
+  max-width: none;
+}
+.cw-intro b { color: var(--cream); font-weight: 600; }
+
+.cw-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.cw-controls.sub { margin-bottom: 20px; padding-bottom: 18px; border-bottom: 1px solid var(--rail); }
+.cw-leg {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  color: var(--cream-mute);
+}
+.cw-seg { display: flex; gap: 6px; flex-wrap: wrap; }
+.cw-seg button {
+  font-family: var(--cond);
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  color: var(--cream-mute);
+  background: transparent;
+  border: 1px solid var(--rail);
+  border-radius: 20px;
+  padding: 6px 16px;
+  cursor: pointer;
+}
+.cw-seg button:hover { color: var(--cream); }
+.cw-seg button.on {
+  color: var(--copper);
+  border-color: var(--copper);
+  background: rgba(184,115,51,0.10);
+}
+/* the GPU toggle drives the compute bar, so it takes the compute colour */
+#cwHw button.on {
+  color: #EDEAE3;
+  border-color: rgba(237,234,227,0.55);
+  background: rgba(237,234,227,0.10);
+}
+
+.cw-stage {
+  border: 1px solid var(--rail);
+  border-radius: 3px;
+  background: var(--graphite);
+  padding: 15px 18px 18px;
+  margin-bottom: 14px;
+}
+
+.cw-axis {
+  position: relative;
+  height: 18px;
+  margin: 10px 0 6px 132px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--cream-mute);
+}
+.cw-alab { position: absolute; left: -120px; top: 2px; letter-spacing: 0.08em; }
+.cw-tick { position: absolute; top: 2px; transform: translateX(-50%); }
+
+.cw-lane { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.cw-name {
+  width: 120px;
+  text-align: right;
+  font-family: var(--cond);
+  font-size: 17px;
+  color: var(--cream);
+  line-height: 1.15;
+}
+.cw-name i {
+  display: block;
+  font-style: normal;
+  font-size: 12.5px;
+  color: var(--cream-mute);
+  margin-top: 2px;
+}
+.cw-track {
+  position: relative;
+  flex: 1;
+  height: 52px;
+  background: rgba(0,0,0,0.18);
+  border-radius: 2px;
+}
+.cw-grid {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: var(--rail);
+  opacity: 0.45;
+}
+.cw-bar {
+  position: absolute;
+  top: 5px; bottom: 5px; left: 0;
+  border-radius: 2px;
+  transition: width 240ms ease;
+}
+.cw-bar.compute { background: rgba(237,234,227,0.30); }
+.cw-bar.comm { background: var(--copper); }
+.cw-ghost {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: var(--cream-mute);
+  opacity: 0.5;
+  transition: left 240ms ease;
+}
+.cw-ghost b {
+  position: absolute;
+  bottom: 2px; left: 5px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 400;
+  color: var(--cream-mute);
+  white-space: nowrap;
+}
+.cw-val {
+  position: absolute;
+  top: 8px;
+  font-family: var(--mono);
+  font-size: 19px;
+  color: var(--cream);
+  white-space: nowrap;
+  transition: left 240ms ease;
+}
+.cw-val i {
+  display: block;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--cream-mute);
+  margin-top: 3px;
+}
+
+.cw-ratio {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rail);
+}
+.cw-pct {
+  font-family: var(--mono);
+  font-size: 34px;
+  font-weight: 700;
+  color: var(--copper);
+}
+.cw-pct.over { color: #D9534F; }
+.cw-rlbl { font-family: var(--cond); font-size: 17px; color: var(--cream); }
+.cw-rsub { font-family: var(--cond); font-size: 14.5px; color: var(--cream-mute); }
+
+.cw-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.cw-stat {
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 12px 14px;
+}
+.cw-stat b {
+  display: block;
+  font-family: var(--mono);
+  font-size: 21px;
+  font-weight: 700;
+  color: var(--cream);
+}
+.cw-stat b.hot { color: var(--copper); }
+.cw-stat b.cool { color: #EDEAE3; }
+.cw-stat span {
+  display: block;
+  font-family: var(--cond);
+  font-size: 13px;
+  color: var(--cream-mute);
+  margin-top: 4px;
+  line-height: 1.35;
+}
+
+@media (max-width: 880px) {
+  .cw-name { width: 84px; font-size: 15px; }
+  .cw-axis { margin-left: 96px; }
+  .cw-val { font-size: 15px; }
+}
+
+/* ---------- walkthrough-to-cost bridge ---------- */
+
+.br-map { margin-bottom: 22px; }
+.br-map td.br-toy { color: var(--cream-mute); font-family: var(--mono); font-size: 11.5px; }
+.br-map td.br-real { color: var(--cream); font-family: var(--mono); font-size: 13px; }
+.br-mult {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--copper);
+  background: rgba(184,115,51,0.14);
+  padding: 1px 6px;
+  border-radius: 2px;
+}
+
+.br-strip {
+  border: 1px solid var(--rail);
+  border-radius: 3px;
+  background: var(--graphite);
+  padding: 14px 16px 15px;
+  margin-bottom: 14px;
+}
+.br-hops {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 12px 0 12px;
+}
+.br-hop {
+  width: 26px;
+  height: 30px;
+  border-radius: 2px;
+  display: block;
+}
+.br-hop.rs { background: var(--copper); }
+.br-hop.ag { background: rgba(237,234,227,0.22); }
+.br-gap { width: 14px; }
+.br-more {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--cream-mute);
+  margin-left: 6px;
+}
+.br-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  font-family: var(--cond);
+  font-size: 13.5px;
+  color: var(--cream-mute);
+}
+.br-legend .sw {
+  display: inline-block;
+  width: 11px; height: 11px;
+  border-radius: 2px;
+  margin-right: 7px;
+}
+.br-legend .sw.rs { background: var(--copper); }
+.br-legend .sw.ag { background: rgba(237,234,227,0.22); }
+
+/* ---------- ZeRO stages widget ---------- */
+
+.zw-stage {
+  border: 1px solid var(--rail);
+  border-radius: 3px;
+  background: var(--graphite);
+  padding: 14px 16px 15px;
+  margin-bottom: 16px;
+  overflow-x: auto;
+}
+.zw-cards { display: flex; gap: 10px; margin: 12px 0 10px; min-width: 700px; }
+.zw-gpu { flex: 1; min-width: 0; }
+.zw-stacks {
+  display: flex;
+  gap: 2px;
+  align-items: flex-end;
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  padding: 7px 5px 5px;
+  background: var(--panel);
+}
+.zw-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; }
+.zw-cell { display: block; width: 100%; }
+.zw-cell.ghost {
+  background: transparent;
+  border: 1px dashed var(--rail);
+  border-top: none;
+  border-bottom: none;
+}
+.zw-col .zw-cell:first-child { border-radius: 1px 1px 0 0; }
+.zw-tick { display: block; height: 3px; margin-top: 4px; background: transparent; }
+.zw-tick.own { background: var(--copper); }
+.zw-name {
+  font-family: var(--cond);
+  font-size: 13px;
+  color: var(--cream-mute);
+  text-align: center;
+  margin-top: 6px;
+}
+.zw-foot {
+  font-family: var(--cond);
+  font-size: 13.5px;
+  color: var(--cream-mute);
+  line-height: 1.5;
+}
+.zw-foot i { color: var(--copper); font-style: italic; }
+
+.zw-split { display: flex; gap: 20px; flex-wrap: wrap; }
+.zw-left { flex: 1 1 400px; min-width: 0; }
+.zw-right { flex: 1 1 300px; min-width: 0; }
+
+.zw-meter { margin: 10px 0 14px; }
+.zw-track {
+  position: relative;
+  height: 26px;
+  background: var(--graphite);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.zw-need-bar {
+  display: block;
+  height: 100%;
+  background: repeating-linear-gradient(45deg, rgba(217,83,79,0.55) 0 6px, rgba(217,83,79,0.30) 6px 12px);
+  transition: width 240ms ease;
+}
+.zw-need-bar.ok {
+  background: repeating-linear-gradient(45deg, rgba(184,115,51,0.55) 0 6px, rgba(184,115,51,0.28) 6px 12px);
+}
+.zw-card-line { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--cream); }
+.zw-marks {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-family: var(--cond);
+  font-size: 13px;
+  color: var(--cream-mute);
+  margin-top: 6px;
+}
+.zw-need b.bad { color: #D9534F; font-family: var(--mono); font-size: 12px; }
+.zw-need b.ok { color: var(--copper); font-family: var(--mono); font-size: 12px; }
+
+.zw-note {
+  font-family: var(--cond);
+  font-size: 14px;
+  color: var(--cream-mute);
+  line-height: 1.55;
+  margin-top: 10px;
+}
+.zw-note b { color: var(--cream); }
+
+.zw-tab td, .zw-tab th { font-size: 13px; }
+.zw-sw {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 2px;
+  margin-right: 8px;
+}
+.zw-tab td.zw-one { color: var(--copper); }
+
+.zw-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid var(--rail);
+}
+.zw-head b {
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 700;
+}
+.zw-head b.bad { color: #D9534F; }
+.zw-head b.ok { color: var(--copper); }
+.zw-head span {
+  font-family: var(--cond);
+  font-size: 13.5px;
+  color: var(--cream-mute);
+  line-height: 1.35;
+}
+
+/* ---------- memory ladder ---------- */
+
+.ml-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 260px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  color: var(--cream-mute);
+}
+.ml-field input[type=range] { width: 100%; accent-color: var(--copper); cursor: pointer; }
+.ml-field output {
+  font-family: var(--cond);
+  font-size: 16px;
+  letter-spacing: 0.01em;
+  color: var(--cream);
+}
+
+.ml-rows { margin: 6px 0 4px; }
+.ml-row { display: flex; align-items: center; gap: 12px; margin-bottom: 11px; }
+.ml-lbl {
+  width: 128px;
+  font-family: var(--cond);
+  font-size: 15px;
+  color: var(--cream-dim);
+  flex: none;
+}
+.ml-track {
+  position: relative;
+  flex: 1;
+  height: 22px;
+  background: var(--graphite);
+  border: 1px solid var(--rail);
+  border-radius: 2px;
+  overflow: hidden;
+  min-width: 0;
+}
+.ml-bar { display: block; height: 100%; opacity: 0.75; transition: width 160ms ease; }
+.ml-card { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--copper); }
+.ml-floor {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: var(--cream);
+  opacity: 0.65;
+}
+.ml-val {
+  font-family: var(--mono);
+  font-size: 13px;
+  width: 58px;
+  text-align: right;
+  flex: none;
+}
+.ml-val.ok { color: var(--copper); }
+.ml-val.bad { color: #D9534F; }
+.ml-verdict {
+  font-family: var(--cond);
+  font-size: 13.5px;
+  width: 38px;
+  flex: none;
+}
+.ml-verdict.ok { color: var(--copper); }
+.ml-verdict.bad { color: #D9534F; }
+
+/* ---------- memory wall chart ---------- */
+
+.mw-split { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+.mw-chart { flex: 1 1 440px; min-width: 0; }
+.mw-side { flex: 1 1 280px; min-width: 0; }
+.mw-chart svg { width: 100%; height: auto; }
+
+.w-tab td.mw-ok { color: var(--copper); }
+.w-tab td.mw-bad { color: #D9534F; }
+
+.mw-floor {
+  border: 1px solid var(--copper-dim);
+  border-left-width: 3px;
+  background: rgba(184,115,51,0.07);
+  border-radius: 2px;
+  padding: 12px 16px;
+  margin: 16px 0 12px;
+  font-family: var(--cond);
+  font-size: 15.5px;
+  color: var(--cream-dim);
+}
+.mw-floor b { color: var(--copper); font-weight: 600; }
+
+/* ---------- state + activations widget ---------- */
+
+.tv-wrap { display: flex; gap: 22px; flex-wrap: wrap; align-items: flex-start; }
+.tv-chart { flex: 0 1 320px; min-width: 0; }
+.tv-chart svg { width: 100%; height: auto; }
+.tv-side { flex: 1 1 280px; min-width: 0; }
+
+.tv-verdicts { margin-top: 14px; }
+.tv-v {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--cond);
+  font-size: 14.5px;
+  color: var(--cream-dim);
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(58,64,69,0.6);
+}
+.tv-v .sw { width: 10px; height: 10px; border-radius: 2px; }
+.tv-v b { margin-left: auto; font-family: var(--mono); font-size: 12px; }
+.tv-v b.ok { color: var(--copper); }
+.tv-v b.bad { color: #D9534F; }
+
+/* ---------- overlap timeline ---------- */
+
+.ob-stage {
+  border: 1px solid var(--rail);
+  border-radius: 3px;
+  background: var(--graphite);
+  padding: 14px 16px 12px;
+  margin-bottom: 14px;
+  overflow-x: auto;
+}
+.ob-stage svg { width: 100%; height: auto; min-width: 620px; }
+.ob-cap {
+  font-family: var(--cond);
+  font-size: 14px;
+  color: var(--cream-mute);
+  line-height: 1.5;
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rail);
+}
+.ob-cap b { color: var(--cream); }
+
+.cw-note-inline {
+  font-family: var(--cond);
+  font-size: 14px;
+  color: var(--cream-mute);
+}
+
+/* ---------- lab steps ---------- */
+
+.lab-steps {
+  list-style: none;
+  counter-reset: step;
+  padding: 0;
+  margin: 26px 0 30px;
+  max-width: var(--measure);
+}
+.lab-steps li {
+  counter-increment: step;
+  position: relative;
+  padding: 0 0 18px 48px;
+  margin: 0 0 18px;
+  border-bottom: 1px solid var(--rail);
+}
+.lab-steps li:last-child { border-bottom: none; }
+.lab-steps li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0; top: 1px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--copper);
+  border: 1px solid var(--copper-dim);
+  border-radius: 2px;
+  width: 26px;
+  height: 26px;
+  line-height: 24px;
+  text-align: center;
+}
+.lab-steps b {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 20px;
+  color: var(--cream);
+  display: block;
+  margin-bottom: 6px;
+}
+.lab-steps p { margin: 0; color: var(--cream-dim); font-size: 15.5px; }
+
+/* ---------- footer nav ---------- */
+
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 84px;
+  padding-top: 22px;
+  border-top: 1px solid var(--rail);
+  max-width: 860px;
+}
+.pager a {
+  color: var(--cream-dim);
+  text-decoration: none;
+  font-family: var(--cond);
+  font-size: 19px;
+}
+.pager a:hover { color: var(--copper); }
+.pager a span {
+  display: block;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--cream-mute);
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+}
+.pager .next { text-align: right; }
+
+/* ---------- index-only ---------- */
+
+.toc { max-width: 780px; margin-top: 44px; }
+
+.toc-row {
+  display: grid;
+  grid-template-columns: 46px 1fr;
+  gap: 22px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--rail);
+  text-decoration: none;
+  color: inherit;
+}
+.toc-row:first-child { border-top: 1px solid var(--rail); }
+.toc-row u {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--copper);
+  text-decoration: none;
+  padding-top: 6px;
+}
+.toc-row b {
+  font-family: var(--cond);
+  font-weight: 500;
+  font-size: 24px;
+  color: var(--cream);
+  display: block;
+  line-height: 1.2;
+}
+.toc-row p {
+  margin: 6px 0 0;
+  font-size: 15.5px;
+  color: var(--cream-dim);
+  max-width: 60ch;
+}
+a.toc-row:hover b { color: var(--copper); }
+.toc-row.pending { opacity: 0.4; }
+.toc-row.pending u { color: var(--cream-mute); }
+
+/* ---------- responsive ---------- */
+
+@media (max-width: 880px) {
+  .rack {
+    position: static;
+    width: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--rail);
+    padding: 20px 0 12px;
+  }
+  main { margin-left: 0; padding: 36px 22px 100px; }
+  body { font-size: 16.5px; }
+  .arith { gap: 20px; }
+  .arith .op { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+  html { scroll-behavior: auto; }
+}
+
+:focus-visible {
+  outline: 2px solid var(--copper);
+  outline-offset: 2px;
+}
+
+</style>
+</head>
+<body>
+
+<nav class="rack">
+  <div class="rack-plate">
+    <a href="index.html">Distributed Training I</a>
+    <span>DATA PARALLEL &amp; ZeRO</span>
+  </div>
+  <div class="rack-group">GROUNDWORK</div>
+  <a class="blade" href="01-memory-tax.html"><u>00</u>The memory tax</a>
+  <a class="blade" href="02-gpu-simd.html"><u>01</u>What a GPU is</a>
+  <a class="blade" href="03-kernels.html"><u>02</u>Three kernels or one</a>
+  <a class="blade" href="04-terminology.html"><u>03</u>Terminology</a>
+  <div class="rack-group">THE ARC</div>
+  <a class="blade" href="05-what-multiplies.html"><u>04</u>What multiplies</a>
+  <a class="blade" href="06-data-parallel.html"><u>05</u>Data parallel</a>
+  <a class="blade" href="07-collectives.html"><u>06</u>Collective operations</a>
+  <a class="blade" href="08-cost.html" aria-current="page"><u>07</u>Cost of communication</a>
+  <a class="blade" href="09-zero-stages.html"><u>08</u>ZeRO stages 1, 2, 3</a>
+  <a class="blade" href="10-memory-ladder.html"><u>09</u>The memory ladder</a>
+  <a class="blade" href="11-offload.html"><u>10</u>Offload to CPU and NVMe</a>
+  <a class="blade" href="12-implementations.html"><u>11</u>FSDP2 and DeepSpeed</a>
+  <a class="blade" href="13-overlap.html"><u>12</u>Overlapping comm with compute</a>
+  <a class="blade" href="14-precision.html"><u>13</u>Precision and Blackwell</a>
+  <a class="blade" href="15-side-by-side.html"><u>14</u>Side by side</a>
+  <div class="rack-group">THE LAB</div>
+  <a class="blade" href="16-lab-plan.html"><u>L1</u>Build plan</a>
+  <a class="blade" href="17-lab-foundation.html"><u>L2</u>The virtual GPU</a>
+  <a class="blade" href="18-lab-schemes.html"><u>L3</u>The four schemes</a>
+  <a class="blade" href="19-lab-checks.html"><u>L4</u>The two checks</a>
+  <a class="blade" href="20-lab-results.html"><u>L5</u>Results and write-up</a>
+</nav>
+
+<main>
+  <div class="slot">07 / THE ARC</div>
+  <h1>The cost of communication</h1>
+
+  <p class="lede">Sending data between GPUs takes time, and that time is not free. While a GPU
+  is waiting for numbers to arrive, it is not computing. The question for any distributed run
+  is whether the waiting is small compared with the work.</p>
+
+  <p>Our model gives P of 60&nbsp;GB, so data parallelism moves 120&nbsp;GB per GPU on every
+  step. Wiring inside a single machine carries that in about a quarter of a second. A network
+  cable between machines carries the same 120&nbsp;GB in about two and a half seconds.</p>
+
+  <table class="ledger">
+    <caption>Time on the wire, per GPU, per step</caption>
+    <thead>
+      <tr><th>Path</th><th class="n">2P, which is 120 GB</th><th class="n">3P, which is 180 GB</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>NVLink, inside one node</td><td class="n">0.27 s</td><td class="n">0.40 s</td></tr>
+      <tr><td>InfiniBand, between nodes</td><td class="n">2.40 s</td><td class="n">3.60 s</td></tr>
+    </tbody>
+  </table>
+
+  <p>Each of those four figures is one division: bytes to move, divided by bytes per second the
+  link carries.</p>
+
+  <div class="panel bolted" style="margin:24px 0 22px">
+    <div class="nameplate">TIME = BYTES &divide; BANDWIDTH</div>
+    <pre class="w-pre">NVLink      450 GB/s     120 GB / 450 = 0.2667  ->  0.27 s
+                         180 GB / 450 = 0.4000  ->  0.40 s
+
+InfiniBand   50 GB/s     120 GB /  50 = 2.4000  ->  2.40 s
+                         180 GB /  50 = 3.6000  ->  3.60 s</pre>
+  </div>
+
+  <p>And the two byte figures come from P. One copy of the parameters in 16-bit is
+  <code>30 &times; 10<sup>9</sup> &times; 2 = 60&nbsp;GB</code>, so 2P is 120&nbsp;GB and 3P is
+  180&nbsp;GB. Nothing else is in those numbers &mdash; no overhead, no contention, no latency
+  per message. They are the floor, and a real run is slower.</p>
+
+  <p>The 9&times; gap between the two rows is the same 9&times; from the terminology page:
+  450 against 50. Crossing a node boundary costs nine times as much per byte, and the table is
+  just that ratio applied to two payload sizes.</p>
+
+  <p>Whether those numbers matter depends entirely on how long the computation itself takes. A
+  step processing one million tokens on 64 H100 cards takes about 7.1 seconds of compute at a
+  realistic utilisation. The same step on 64 B200 cards takes about 3.1 seconds, because the
+  cards are faster.</p>
+
+  <table class="ledger">
+    <caption>The same step, two generations of card</caption>
+    <thead>
+      <tr><th></th><th class="n">Compute per step</th><th class="n">2P over InfiniBand</th><th class="n">Communication as a fraction of compute</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>64 &times; H100</td><td class="n">7.11 s</td><td class="n">2.40 s</td><td class="n">34%</td></tr>
+      <tr><td>64 &times; B200</td><td class="n">3.13 s</td><td class="n">2.40 s</td><td class="n">77%</td></tr>
+    </tbody>
+  </table>
+
+  <p>That last column is communication divided by compute, which is the standard test for
+  whether a run is limited by its arithmetic or by its wiring. If none of the transfer is
+  hidden, the step takes the sum of the two, so 9.51 seconds on H100 and 5.53 seconds on
+  B200.</p>
+
+  <figure class="figure">
+    <svg class="diagram" viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg" role="img"
+         aria-label="Compute shrinks between card generations while communication stays fixed">
+      <text class="d-small" x="0" y="16">64 &times; H100 &mdash; 9.51 s per step</text>
+      <rect x="0" y="26" width="642" height="34" fill="rgba(237,234,227,0.26)"/>
+      <rect x="642" y="26" width="217" height="34" fill="#B87333"/>
+      <text class="d-mono-sm" x="14" y="48" fill="#1C1F22">compute 7.11 s</text>
+      <text class="d-mono-sm" x="656" y="48" fill="#1C1F22">2.40 s</text>
+
+      <text class="d-small" x="0" y="102">64 &times; B200 &mdash; 5.53 s per step</text>
+      <rect x="0" y="112" width="282" height="34" fill="rgba(237,234,227,0.26)"/>
+      <rect x="282" y="112" width="217" height="34" fill="#B87333"/>
+      <text class="d-mono-sm" x="14" y="134" fill="#1C1F22">compute 3.13 s</text>
+      <text class="d-mono-sm" x="296" y="134" fill="#1C1F22">2.40 s</text>
+
+      <!-- the fixed-width marker -->
+      <path class="d-wire-dim" d="M642 60 L642 112"/>
+      <path class="d-wire-dim" d="M859 60 L499 112"/>
+      <text class="d-mono-sm d-hot" x="0" y="180">the copper block is the same width in both rows &mdash; nothing about it changed</text>
+      <text class="d-small" x="0" y="202">34% of compute becomes 77% of compute, without a single extra byte crossing the wire</text>
+    </svg>
+    <figcaption>Same bytes, same link, same 2.40 seconds. Only the bar it has to hide behind
+    got shorter.</figcaption>
+  </figure>
+
+  <p><strong>Faster GPUs raise the ratio of communication to compute.</strong> The volume stays
+  at 120&nbsp;GB while the compute it hides behind gets shorter. This is the most important
+  consequence of buying newer hardware, and it is why the arrangement of the run matters more
+  for a model of this size than it did for earlier and smaller ones.</p>
+
+  <p>The ratio is still below 1 in both rows, so a transfer that runs entirely during the
+  computation is still fully hidden. Overlapping the exchange with the backward pass is how that
+  is arranged, and the rise from 34 percent to 77 percent is what turns that arrangement from an
+  optimisation into a requirement.</p>
+
+  <figure class="figure">
+    <svg class="diagram" viewBox="0 0 860 180" xmlns="http://www.w3.org/2000/svg" role="img"
+         aria-label="Overlapped versus serial execution of compute and communication">
+      <text class="d-small" x="0" y="16">not overlapped &mdash; the step is the sum</text>
+      <rect x="0" y="26" width="430" height="26" fill="rgba(237,234,227,0.26)"/>
+      <rect x="430" y="26" width="145" height="26" fill="#B87333"/>
+      <text class="d-mono-sm" x="12" y="44" fill="#1C1F22">compute</text>
+      <text class="d-mono-sm" x="442" y="44" fill="#1C1F22">comm</text>
+      <text class="d-mono-sm" x="588" y="44">5.53 s</text>
+
+      <text class="d-small" x="0" y="96">overlapped &mdash; the step is just the compute</text>
+      <rect x="0" y="106" width="430" height="26" fill="rgba(237,234,227,0.26)"/>
+      <rect x="150" y="112" width="145" height="14" fill="#B87333"/>
+      <text class="d-mono-sm" x="12" y="124" fill="#1C1F22">compute</text>
+            <text class="d-mono-sm d-hot" x="588" y="124">3.13 s</text>
+
+      <text class="d-small" x="0" y="166">this only works while the copper bar is shorter than the cream one &mdash; ratio below 1</text>
+    </svg>
+    <figcaption>Gradients for the early layers are ready long before the backward pass finishes,
+    so they can be sent while later layers are still computing.</figcaption>
+  </figure>
+
+  <div class="carry">
+    <b>Carry this forward:</b> communication cost is judged as a fraction of step time, and that
+    fraction grows as the cards get faster.
+  </div>
+
+  <div class="callout">
+    <h4>The uncomfortable direction of travel</h4>
+    <p>Faster cards shorten the compute but not the wire. Moving from H100 to B200 cuts the
+    step from 7.1 seconds to 3.1 while the 2.40 seconds of InfiniBand traffic stays exactly
+    where it was. The communication share of a step grows every hardware generation unless the
+    interconnect improves at the same rate, which is why the next few pages care so much about
+    moving less rather than moving faster.</p>
+  </div>
+
+  <h2>Where 2P comes from, and when it is a lie</h2>
+
+  <p>The six hops on the previous page are where this number is born. Each hop, a card sends
+  one chunk, and a chunk is one N<sup>th</sup> of the gradient. Three hops for the
+  reduce-scatter and three for the all-gather, so with four cards:</p>
+
+  <div class="arith">
+    <div><b class="v">6</b><span class="k">hops</span></div>
+    <div class="op">&times;</div>
+    <div><b class="v">15 GB</b><span class="k">one quarter of P</span></div>
+    <div class="op">=</div>
+    <div><b class="v hot">90 GB</b><span class="k">1.5P, not 2P</span></div>
+  </div>
+
+  <p>The exact figure is <code>2(N &minus; 1)/N &times; P</code>. It is 1.5P on four cards,
+  1.75P on eight, and 1.97P on sixty-four. It approaches 2P from below and never reaches it, so
+  quoting 2P is a convenient overestimate that gets truer as the cluster grows.</p>
+
+  <h2>From the walkthrough to the bill</h2>
+
+  <p>The previous page ran four cards, four columns and six hops on a gradient of four numbers.
+  That structure is the real one &mdash; it does not change at scale. What changes is how big a
+  column is. Set the run and every stage of the toy example picks up its weight in bytes and
+  seconds.</p>
+
+  <div class="widget">
+    <p class="cw-intro">The walkthrough on the previous page had four cards, four columns and six
+    hops. Nothing about that structure changes at real scale &mdash; only the size of a column
+    does. Set the run below and every stage of the toy example gets its real weight in bytes and
+    seconds.</p>
+
+    <div class="cw-controls">
+      <span class="cw-leg">GPUS</span>
+      <div class="cw-seg" id="brN">
+        <button data-v="4" class="on">4</button>
+        <button data-v="8">8</button>
+        <button data-v="32">32</button>
+        <button data-v="64">64</button>
+      </div>
+      <span class="cw-leg">LINK</span>
+      <div class="cw-seg" id="brLink">
+        <button data-v="450">NVLink</button>
+        <button data-v="50" class="on">InfiniBand</button>
+      </div>
+    </div>
+
+    <table class="w-tab br-map">
+      <thead><tr><th>Stage of the walkthrough</th><th>In the toy example</th><th class="n">At 30 billion parameters</th></tr></thead>
+      <tbody id="brMap"></tbody>
+    </table>
+
+    <div class="br-strip">
+      <div class="w-bcap" id="brHead"></div>
+      <div class="br-hops" id="brHops"></div>
+      <div class="br-legend">
+        <span><i class="sw rs"></i>reduce-scatter hops &mdash; every one performs additions</span>
+        <span><i class="sw ag"></i>all-gather hops &mdash; every one only copies</span>
+      </div>
+    </div>
+
+    <div class="cw-stats" id="brStats"></div>
+    <div class="w-work" id="brWork"></div>
+  </div>
+
+  <script>
+  (function () {
+    var PARAMS = 30e9, BYTES = 2, P = PARAMS * BYTES / 1e9;   // 60 GB
+    var MFU = 0.40, PEAK = 989e12, TOK = 1e6;
+    var N = 4, link = 50;
+    var el = function (id) { return document.getElementById(id); };
+
+    function seg(id, cb) {
+      el(id).addEventListener('click', function (e) {
+        var b = e.target.closest('button');
+        if (!b) return;
+        var bs = this.querySelectorAll('button');
+        for (var i = 0; i < bs.length; i++) bs[i].className = '';
+        b.className = 'on';
+        cb(+b.getAttribute('data-v'));
+      });
+    }
+
+    function sec(v) { return v.toFixed(2); }
+    function render() {
+      var cols = N;
+      var perHop = P / N;                    // GB moved by one card in one hop
+      var hopsPhase = N - 1;
+      var hops = 2 * hopsPhase;
+      var total = hops * perHop;
+      var mult = total / P;
+      var hopT = perHop / link;
+      var commT = total / link;
+      var compT = 6 * PARAMS * TOK / (N * PEAK * MFU);
+      var linkName = link === 450 ? 'NVLink' : 'InfiniBand';
+
+      // mapping table
+      var rows = [
+        ['the batch', '8 samples, 2 per card', (N * 2).toLocaleString() + ' samples, 2 per card'],
+        ['one card\u2019s gradient', '4 numbers', P.toFixed(0) + ' GB'],
+        ['one column, the unit that moves', '1 number', perHop.toFixed(perHop < 10 ? 2 : 1) + ' GB'],
+        ['hops in the reduce-scatter', '3', hopsPhase],
+        ['hops in the all-gather', '3', hopsPhase],
+        ['sent per card, all hops', '6 numbers', total.toFixed(1) + ' GB &nbsp;<span class="br-mult">' +
+          mult.toFixed(3) + 'P</span>']
+      ];
+      var h = '';
+      rows.forEach(function (r) {
+        h += '<tr><td>' + r[0] + '</td><td class="br-toy">' + r[1] + '</td><td class="n br-real">' +
+          r[2] + '</td></tr>';
+      });
+      el('brMap').innerHTML = h;
+
+      // hop strip
+      el('brHead').textContent = hops + ' HOPS \u00b7 ' + perHop.toFixed(2) + ' GB EACH \u00b7 ' +
+        (hopT * 1000).toFixed(hopT * 1000 < 10 ? 2 : 1) + ' ms EACH ON ' + linkName.toUpperCase();
+
+      var s = '', shown = Math.min(hops, 14), half = hops / 2;
+      for (var i = 0; i < shown; i++) {
+        var isRS = i < half;
+        s += '<i class="br-hop ' + (isRS ? 'rs' : 'ag') + '" title="hop ' + (i + 1) + '"></i>';
+        if (i === half - 1 && hops <= 14) s += '<i class="br-gap"></i>';
+      }
+      if (hops > shown) s += '<span class="br-more">+ ' + (hops - shown) + ' more</span>';
+      el('brHops').innerHTML = s;
+
+      el('brStats').innerHTML =
+        '<div class="cw-stat"><b class="hot">' + perHop.toFixed(2) + ' GB</b><span>one column, the ' +
+        'thing a single hop moves</span></div>' +
+        '<div class="cw-stat"><b>' + hops + '</b><span>hops, ' + hopsPhase + ' scatter + ' +
+        hopsPhase + ' gather</span></div>' +
+        '<div class="cw-stat"><b class="hot">' + total.toFixed(1) + ' GB</b><span>' + mult.toFixed(3) +
+        'P per card per step</span></div>' +
+        '<div class="cw-stat"><b>' + sec(commT) + ' s</b><span>all hops on ' + linkName +
+        '</span></div>';
+
+      var w = '<div class="w-note"><b>Each hop moves one column.</b> In the walkthrough a column was ' +
+        'one number; here it is <code>P \u00f7 ' + N + ' = ' + perHop.toFixed(2) + ' GB</code>. ' +
+        'There are ' + hopsPhase + ' hops in each phase, so <code>' + hops + ' \u00d7 ' +
+        perHop.toFixed(2) + ' = ' + total.toFixed(1) + ' GB</code> leaves each card per step.</div>';
+      w += '<div class="w-note dim">That is <b>' + mult.toFixed(3) + 'P</b>, not 2P. The exact ring ' +
+        'cost is <code>2(N \u2212 1)/N \u00d7 P</code>, which climbs toward 2P as the cluster grows ' +
+        'and is furthest from it on small runs like the four-card walkthrough.</div>';
+      w += '<div class="w-note dim">Half those hops do arithmetic and half only copy. The ' +
+        hopsPhase + ' all-gather hops cost <code>' + (hopsPhase * perHop).toFixed(1) + ' GB</code> ' +
+        'and <code>' + sec(hopsPhase * hopT) + ' s</code> without computing anything. That is ' +
+        'the half ZeRO-2 declines to pay.</div>';
+      w += '<div class="w-note">Against a compute time of <code>' + sec(compT) + ' s</code> on ' +
+        N + ' H100s at 1M tokens, the exchange is <b>' + (commT / compT * 100).toFixed(1) +
+        '%</b> of the arithmetic.</div>';
+      el('brWork').innerHTML = w;
+    }
+
+    seg('brN', function (v) { N = v; render(); });
+    seg('brLink', function (v) { link = v; render(); });
+    render();
+  })();
+  </script>
+
+  <p>The strip makes the ZeRO-2 argument concrete before we get there. Half the blocks are
+  copper and do arithmetic; half are cream and only copy. At 8 GPUs on InfiniBand the cream half
+  is 52.5&nbsp;GB and 1.05 seconds per card per step, spent moving numbers that were already
+  finished.</p>
+
+  <h2>Work it out</h2>
+
+  <p>Set the cards and the link, and read both bars against the same pinned axis. Each lane
+  carries a faint vertical line showing where its <em>other</em> option would land &mdash; the
+  other card generation on the compute lane, the other interconnect on the network lane &mdash;
+  so the effect of a change is visible without switching back and forth.</p>
+
+  <div class="widget">
+    <p class="cw-intro">One training step of a <b>30 billion</b> parameter model,
+    <b id="cwTokLbl">one million</b> tokens, on <b id="cwNLbl">64</b> GPUs. Data parallelism moves
+    <b>120 GB</b> of gradients across the link for every GPU on every step. The axis below is
+    pinned from 0 to 10 seconds, so one second is the same width whatever the controls say.</p>
+
+    <div class="cw-controls">
+      <span class="cw-leg">GPU</span>
+      <div class="cw-seg" id="cwHw">
+        <button data-v="989" class="on">H100</button>
+        <button data-v="2250">B200</button>
+      </div>
+
+      <span class="cw-leg">LINK</span>
+      <div class="cw-seg" id="cwLink">
+        <button data-v="450">NVLink 450 GB/s, inside one node</button>
+        <button data-v="50" class="on">InfiniBand 50 GB/s, between nodes</button>
+      </div>
+    </div>
+
+    <div class="cw-controls sub">
+      <label class="cc-field">world size
+        <select id="cwN">
+          <option value="8">8 GPUs</option>
+          <option value="32">32 GPUs</option>
+          <option value="64" selected>64 GPUs</option>
+        </select>
+      </label>
+      <label class="cc-field">tokens per step
+        <select id="cwTok">
+          <option value="250000">250 k</option>
+          <option value="1000000" selected>1 M</option>
+          <option value="4000000">4 M</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="cw-stage">
+      <div class="w-bcap">ONE TRAINING STEP, ON A PINNED AXIS FROM 0 TO 10 SECONDS</div>
+      <div class="cw-chart" id="cwChart"></div>
+      <div class="cw-ratio">
+        <span class="cw-pct" id="cwPct"></span>
+        <span class="cw-rlbl">communication time divided by compute time</span>
+        <span class="cw-rsub" id="cwRsub"></span>
+      </div>
+    </div>
+
+    <div class="cw-stats" id="cwStats"></div>
+    <div class="w-work" id="cwWork"></div>
+  </div>
+
+  <script>
+  (function () {
+    var PARAMS = 30e9, BYTES = 2, MFU = 0.40, AXIS = 10;
+    var el = function (id) { return document.getElementById(id); };
+    var hw = 989, link = 50;
+
+    function seg(id, cb) {
+      el(id).addEventListener('click', function (e) {
+        var b = e.target.closest('button');
+        if (!b) return;
+        var bs = this.querySelectorAll('button');
+        for (var i = 0; i < bs.length; i++) bs[i].className = '';
+        b.className = 'on';
+        cb(+b.getAttribute('data-v'));
+      });
+    }
+
+    function calc() {
+      var N = +el('cwN').value, tok = +el('cwTok').value;
+      var P = PARAMS * BYTES / 1e9;                 // 60 GB
+      var traffic = 2 * P;                          // 2P, the quoted figure
+      var comm = traffic / link;
+      var flops = 6 * PARAMS * tok;
+      var comp = flops / (N * hw * 1e12 * MFU);
+      var other = flops / (N * (hw === 989 ? 2250 : 989) * 1e12 * MFU);
+      var otherLink = link === 450 ? 50 : 450;
+      var otherComm = traffic / otherLink;
+      return { N: N, tok: tok, P: P, traffic: traffic, comm: comm, comp: comp, other: other,
+               otherComm: otherComm, otherLink: otherLink,
+               ratio: comm / comp, share: comm / (comm + comp), total: comm + comp };
+    }
+
+    function sec(v) { return v.toFixed(2); }
+    function pct(x) { return Math.min(x / AXIS * 100, 100) + '%'; }
+    function rpct(r) { var v = r * 100; return v < 10 ? v.toFixed(1) : v.toFixed(0); }
+
+    function render() {
+      var d = calc();
+      var hwName = hw === 989 ? 'H100' : 'B200';
+      var otherName = hw === 989 ? 'B200' : 'H100';
+      var linkName = link === 450 ? 'NVLink' : 'InfiniBand';
+
+      var ticks = '';
+      for (var s = 0; s <= AXIS; s++) {
+        ticks += '<span class="cw-tick" style="left:' + (s / AXIS * 100) + '%">' + s + '</span>';
+        if (s > 0) ticks += '<i class="cw-grid" style="left:' + (s / AXIS * 100) + '%"></i>';
+      }
+
+      var h = '<div class="cw-axis"><span class="cw-alab">seconds</span>' + ticks + '</div>';
+
+      h += '<div class="cw-lane">' +
+        '<span class="cw-name">compute<i>the arithmetic</i></span>' +
+        '<div class="cw-track">' + ticks.replace(/cw-tick[^>]*>[0-9]+<\/span>/g, '') +
+        '<i class="cw-bar compute" style="width:' + pct(d.comp) + '"></i>' +
+        '<i class="cw-ghost" style="left:' + pct(d.other) + '"><b>' + otherName + ', ' +
+        sec(d.other) + ' s</b></i>' +
+        '<span class="cw-val" style="left:calc(' + pct(d.comp) + ' + 12px)">' +
+        sec(d.comp) + ' s<i>' + hwName + ', ' + d.N + ' cards</i></span>' +
+        '</div></div>';
+
+      h += '<div class="cw-lane">' +
+        '<span class="cw-name">network<i>the gradients</i></span>' +
+        '<div class="cw-track">' + ticks.replace(/cw-tick[^>]*>[0-9]+<\/span>/g, '') +
+        '<i class="cw-bar comm" style="width:' + pct(d.comm) + '"></i>' +
+        '<i class="cw-ghost" style="left:' + pct(d.otherComm) + '"><b>' +
+        (d.otherLink === 450 ? 'NVLink' : 'InfiniBand') + ', ' + sec(d.otherComm) +
+        ' s</b></i>' +
+        '<span class="cw-val" style="left:calc(' + pct(d.comm) + ' + 12px)">' +
+        sec(d.comm) + ' s<i>' + linkName + '</i></span>' +
+        '</div></div>';
+
+      el('cwChart').innerHTML = h;
+
+      el('cwPct').textContent = rpct(d.ratio) + '%';
+      el('cwPct').className = 'cw-pct' + (d.ratio >= 1 ? ' over' : '');
+      el('cwRsub').textContent = sec(d.comm) + ' s of network for every ' +
+        sec(d.comp) + ' s of compute';
+
+      el('cwStats').innerHTML =
+        stat(d.traffic.toFixed(0) + ' GB', 'gradient traffic per GPU per step', 'hot') +
+        stat(sec(d.comm) + ' s', d.traffic.toFixed(0) + ' GB at ' + link + ' GB/s', 'hot') +
+        stat(sec(d.comp) + ' s', (d.tok / 1e6) + 'M tokens on ' + d.N + ' ' + hwName +
+             ', ' + (MFU * 100) + '% utilisation', 'cool') +
+        stat(sec(d.total) + ' s', 'step time with no overlap', '');
+
+      var w = '<div class="w-note">The traffic is <code>2 \u00d7 30e9 \u00d7 2 bytes = 120 GB</code> ' +
+        'per GPU per step, and that volume holds still when the card changes. A step with no overlap ' +
+        'costs <code>' + sec(d.comp) + ' + ' + sec(d.comm) + ' = ' + sec(d.total) +
+        ' s</code>.</div>';
+      w += '<div class="w-note dim">The headline figure divides communication by compute. ' +
+        'Communication is <b>' + (d.share * 100).toFixed(1) + '%</b> of the whole ' +
+        sec(d.total) + ' second step, which is the share of step time. ';
+      w += d.ratio < 1
+        ? 'The ratio <b>' + rpct(d.ratio) + '%</b> is below 100%, so a transfer that ' +
+          'runs during the computation is fully hidden.'
+        : 'The ratio <b>' + rpct(d.ratio) + '%</b> is above 100%, so the transfer cannot ' +
+          'fit inside the computation however well it is overlapped \u2014 some of the wait is ' +
+          'unavoidable.';
+      w += '</div>';
+      w += '<div class="w-note dim">Switch the card and watch the copper bar stay exactly where it ' +
+        'is. Faster arithmetic does not move a single byte off the wire.</div>';
+      el('cwWork').innerHTML = w;
+
+      el('cwNLbl').textContent = d.N;
+      el('cwTokLbl').textContent = d.tok === 1e6 ? 'one million' : (d.tok / 1e6) + ' million';
+    }
+
+    function stat(big, sub, cls) {
+      return '<div class="cw-stat"><b class="' + cls + '">' + big + '</b><span>' + sub + '</span></div>';
+    }
+
+    seg('cwHw', function (v) { hw = v; render(); });
+    seg('cwLink', function (v) { link = v; render(); });
+    el('cwN').addEventListener('change', render);
+    el('cwTok').addEventListener('change', render);
+    render();
+  })();
+  </script>
+
+  <div class="pager">
+    <a href="07-collectives.html"><span>BACK</span>Collective operations</a>
+    <a class="next" href="09-zero-stages.html"><span>NEXT</span>ZeRO stages 1, 2 and 3</a>
+  </div>
+</main>
+
+</body>
+</html>
