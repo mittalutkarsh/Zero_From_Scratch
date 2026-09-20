@@ -191,12 +191,7 @@ Resident and peak memory differ only for ZeRO-3:
 ## Files
 
 ```
-zerosim/
-  comm.py       three collectives, each charging the ring cost, with a byte counter
-  model.py      3-layer MLP, all parameters in one flat float32 vector
-  schemes.py    DP, ZeRO-1, ZeRO-2, ZeRO-3
-tests/
-  test_all.py   equivalence, memory formulas, ring traffic
+
 notebooks/
   zero_stages_walkthrough.ipynb
 docs/
